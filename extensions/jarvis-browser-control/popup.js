@@ -10,7 +10,7 @@ function describe(reply) {
   if (reply.connected && reply.selected) return "Connected to Jarvis.";
   if (reply.connected) return "Connected as a standby Chrome profile.";
   if (reply.socketOpen) return "Connected locally; waiting for Jarvis to answer.";
-  return "Not connected. Make sure Jarvis is running and has used its browser tools once.";
+  return "Not connected. Start Jarvis (uv run jarvis); this connects by itself within a few seconds.";
 }
 
 async function refresh() {

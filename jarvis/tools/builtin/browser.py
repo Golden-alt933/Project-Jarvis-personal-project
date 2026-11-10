@@ -185,7 +185,11 @@ def _label(element: dict[str, Any]) -> str:
 def _outcome(message: str, reply: dict[str, Any]) -> ToolResult:
     block = page_block(reply.get("url", ""), reply.get("title", ""))
     tab = f" (tab_id={reply['tabId']})" if "tabId" in reply else ""
-    return ToolResult.success(f"{message}{tab}\n{block}", data={k: reply.get(k) for k in ("tabId", "url")})
+    # The block carries only the address and title; say so, or it reads as an empty page.
+    note = "The page text is not included above: call browser_read for it, or browser_inspect for its controls."
+    return ToolResult.success(
+        f"{message}{tab}\n{block}\n{note}", data={k: reply.get(k) for k in ("tabId", "url")}
+    )
 
 
 # -- status and tabs ---------------------------------------------------------------------

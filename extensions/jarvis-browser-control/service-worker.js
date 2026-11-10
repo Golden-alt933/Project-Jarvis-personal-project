@@ -490,6 +490,13 @@ async function handleCommand(action, parameters = {}) {
     result = {
       message: `Typed ${text.length} characters into '${prepared.label}'${parameters.submit ? " and pressed Enter" : ""}.`,
     };
+    if (parameters.submit) {
+      // Enter usually navigates (a search, a form post). Wait for that page, or the
+      // next read would still see the old one.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const current = await chrome.tabs.get(tab.id);
+      if (current.status === "loading") await loadWaiter(tab.id, 8000);
+    }
   } else if (action === "fill_form" || PAGE_ACTIONS.has(action)) {
     result = await runPageAction(tab.id, action, parameters);
   } else {
