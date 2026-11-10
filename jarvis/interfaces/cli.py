@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import json
 import sys
 from dataclasses import dataclass, field
@@ -558,8 +559,23 @@ def print_browser_token() -> int:
     return 0
 
 
-async def _with_cleanup(main: Any) -> int:
+async def _start_browser_bridge(settings: Any) -> None:
+    """Listen for the Chrome extension from startup, so it has connected by the time
+    it is needed. Never fatal: without it only the browser tools are affected."""
+    try:
+        from jarvis.browser.bridge import get_bridge
+
+        await get_bridge(settings)
+    except ImportError:  # the browser extra is not installed
+        pass
+    except Exception as exc:  # e.g. the port is held by another Jarvis
+        logging.getLogger(__name__).warning("browser bridge not started: %s", exc)
+
+
+async def _with_cleanup(main: Any, settings: Any = None) -> int:
     """Run a frontend, then stop background services in the loop that started them."""
+    if settings is not None:
+        await _start_browser_bridge(settings)
     try:
         return await main
     finally:
@@ -594,18 +610,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         resumed = False if args.new else app.resume()
         if args.once is not None:
-            return asyncio.run(_with_cleanup(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose)))
+            return asyncio.run(_with_cleanup(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose), app.settings))
         if args.voice:
             try:
                 from jarvis.interfaces.voice import run_voice
             except ImportError as exc:
                 console.print(Text(voice_install_message(exc.name), style="yellow"))
                 return 2
-            return asyncio.run(_with_cleanup(run_voice(app, console)))
+            return asyncio.run(_with_cleanup(run_voice(app, console), app.settings))
         if args.yes:
             console.print(Text("--yes only applies with --once; ignoring it.", style="yellow"))
         print_banner(console, app, resumed)
-        return asyncio.run(_with_cleanup(_interactive_main(app, console, args.verbose)))
+        return asyncio.run(_with_cleanup(_interactive_main(app, console, args.verbose), app.settings))
     except KeyboardInterrupt:
         return 130
     finally:

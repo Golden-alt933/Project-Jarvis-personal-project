@@ -26,6 +26,7 @@ from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlparse
 
 from jarvis.browser.bridge import (
+    BrowserBridge,
     BridgeCommandError,
     BridgeError,
     BridgeNotConnected,
@@ -127,8 +128,24 @@ def _guard(fn: Callable[..., Awaitable[ToolResult]]) -> Callable[..., Awaitable[
     return wrapper
 
 
-async def _send(ctx: ToolContext, action: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
+CONNECT_GRACE_SECONDS = 8.0
+
+
+async def _bridge(ctx: ToolContext) -> BrowserBridge:
+    """The shared bridge. The extension reconnects on a timer, so the first call on a
+    bridge waits briefly for it instead of reporting "not connected" straight away."""
     bridge = await get_bridge(ctx.settings)
+    if not bridge.connected and not getattr(bridge, "_grace_used", False):
+        bridge._grace_used = True  # type: ignore[attr-defined]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CONNECT_GRACE_SECONDS
+        while not bridge.connected and not ctx.cancelled.is_set() and loop.time() < deadline:
+            await asyncio.sleep(0.2)
+    return bridge
+
+
+async def _send(ctx: ToolContext, action: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
+    bridge = await _bridge(ctx)
     return await bridge.command(action, params or {}, timeout)
 
 
@@ -191,7 +208,7 @@ async def browser_status(use_profile: str | None = None, ctx: ToolContext = None
         use_profile: Only when several Chrome profiles are connected: the client id of the profile to use.
     """
     try:
-        bridge = await get_bridge(ctx.settings)
+        bridge = await _bridge(ctx)
     except BridgeStartError as exc:
         return ToolResult.fail(str(exc))
     if use_profile:

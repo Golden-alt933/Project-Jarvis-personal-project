@@ -102,11 +102,11 @@ test('reconnect backoff is bounded and resets after a successful handshake', asy
     current.readyState = Socket.CLOSED;
     current.listeners.close({ code: 1006 });
     const timer = timers.at(-1);
-    assert.ok(timer.delay <= 30000);
+    assert.ok(timer.delay <= 5000);
     timer.fn();
     await tick();
   }
-  assert.equal(timers.at(-1).delay, 30000);
+  assert.equal(timers.at(-1).delay, 5000);
 
   const current = sockets.at(-1);
   current.readyState = Socket.OPEN;

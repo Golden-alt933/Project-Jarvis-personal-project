@@ -47,7 +47,7 @@ function isLive(candidate) {
 
 function scheduleReconnect() {
   if (reconnectTimer || authFailed) return;
-  const delay = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
+  const delay = Math.min(5000, 1000 * (2 ** Math.min(reconnectAttempt, 5)));
   reconnectAttempt += 1;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -202,7 +202,7 @@ chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onStartup.addListener(connect);
 // Alarms wake a suspended service worker; the top-level connect() below then
 // restores the socket. The alarm is also the backstop when timers were lost.
-chrome.alarms.create("jarvis-reconnect", { periodInMinutes: 1 });
+chrome.alarms.create("jarvis-reconnect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "jarvis-reconnect" && !authFailed && !isLive(socket)) connect();
 });
