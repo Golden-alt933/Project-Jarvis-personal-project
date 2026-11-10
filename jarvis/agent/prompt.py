@@ -135,8 +135,13 @@ _SAFETY = (
 
 _OUTPUT = {
     "voice": (
-        "Your reply will be spoken aloud. Use short, natural sentences with no Markdown, "
-        "lists or symbols. Do not read out code or long file paths; say what it is and offer "
+        "Your reply will be spoken aloud by a speech synthesizer, so write exactly what should "
+        "be said. Use short, natural sentences and lead with the answer. No Markdown, lists, "
+        "symbols or parentheses. Say times, dates and numbers the way a person would: 'seven "
+        "minutes past midnight', 'the eleventh of November', 'about twelve gigabytes', not "
+        "'00:07' or '11/11/2026'. Listening is slower than reading, so answer in one to three "
+        "sentences: give the conclusion and the one or two figures that matter, then stop. "
+        "The user can ask for the rest. Do not read out code, URLs or long file paths; say what it is and offer "
         "to show it on screen instead."
     ),
     "text": (

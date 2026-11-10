@@ -23,6 +23,7 @@ from jarvis.config import REPO_ROOT, Settings, get_settings
 from jarvis.interfaces.app import App, build_app
 from jarvis.llm.providers import ConfigError, describe
 from jarvis.llm.types import LLMClient, ToolCall
+from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.tools.base import Risk
 
 EXIT_WORDS = {"exit", "quit"}
@@ -337,12 +338,16 @@ def config_error_message(message: str) -> str:
     )
 
 
-def apply_overrides(settings: Settings, provider: str | None, model: str | None) -> Settings:
-    update: dict[str, str] = {}
+def apply_overrides(
+    settings: Settings, provider: str | None, model: str | None, no_wake: bool = False
+) -> Settings:
+    update: dict[str, Any] = {}
     if provider:
         update["provider"] = provider
     if model:
         update["model"] = model
+    if no_wake:
+        update["require_wake_word"] = False
     return settings.model_copy(update=update) if update else settings
 
 
@@ -424,8 +429,11 @@ class LineReader:
             return await asyncio.to_thread(self._plain)
         if self._session is None:
             self._make_sessions()
+        from prompt_toolkit.patch_stdout import patch_stdout
+
         session = self._confirm_session if confirm else self._session
-        return await session.prompt_async(prompt)
+        with patch_stdout(raw=True):  # lets reminders print above the prompt
+            return await session.prompt_async(prompt)
 
     @staticmethod
     def _plain() -> str:
@@ -444,29 +452,44 @@ async def interactive(app: App, console: Console, *, verbose: bool) -> int:
         return await reader.read(prompt, confirm=True)
 
     confirm = Confirmer(console, renderer, ask)
+    busy = False  # reminders wait while a turn is streaming
+
+    async def deliver(text: str) -> None:
+        renderer.pause()
+        console.print(Text(f"  ⏰ {text}", style="bold yellow"))
+
+    watcher = ReminderWatcher(getattr(app, "store", None), deliver, lambda: not busy)
+    watcher.start()
     warned = False
-    while True:
-        try:
-            line = (await reader.read("› ")).strip()
-            warned = False
-        except KeyboardInterrupt:
-            if warned:
+    try:
+        while True:
+            try:
+                line = (await reader.read("› ")).strip()
+                warned = False
+            except KeyboardInterrupt:
+                if warned:
+                    return 0
+                warned = True
+                console.print(Text("Press Ctrl+C again (or Ctrl+D) to exit.", style="dim"))
+                continue
+            except EOFError:
                 return 0
-            warned = True
-            console.print(Text("Press Ctrl+C again (or Ctrl+D) to exit.", style="dim"))
-            continue
-        except EOFError:
-            return 0
-        if not line:
-            continue
-        if line.lower() in EXIT_WORDS:
-            return 0
-        if parse_command(line) is not None:
-            if commands.dispatch(line):
+            if not line:
+                continue
+            if line.lower() in EXIT_WORDS:
                 return 0
-            continue
-        await run_one_turn(app, line, console, renderer, confirm)
-        console.print()
+            if parse_command(line) is not None:
+                if commands.dispatch(line):
+                    return 0
+                continue
+            busy = True
+            try:
+                await run_one_turn(app, line, console, renderer, confirm)
+            finally:
+                busy = False
+            console.print()
+    finally:
+        await watcher.stop()
 
 
 # -- entry point -------------------------------------------------------------------
@@ -479,6 +502,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", help="override JARVIS_PROVIDER for this run")
     p.add_argument("--model", help="override JARVIS_MODEL for this run")
     p.add_argument("--verbose", action="store_true", help="show tool arguments and result previews")
+    p.add_argument("--voice", action="store_true", help="talk to Jarvis: always-open microphone and spoken replies")
+    p.add_argument("--devices", action="store_true", help="list audio devices and exit")
+    p.add_argument("--no-wake", action="store_true", help="voice: treat every utterance as addressed to Jarvis")
     return p
 
 
@@ -499,12 +525,37 @@ async def _interactive_main(app: App, console: Console, verbose: bool) -> int:
     return await interactive(app, console, verbose=verbose)
 
 
+def voice_install_message(missing: str | None) -> str:
+    needs = missing or "numpy, sounddevice, faster-whisper, piper"
+    return (
+        f"Voice mode needs the optional voice dependencies ({needs}).\n"
+        "Install them with:\n\n    uv sync --extra voice\n\nthen run this command again."
+    )
+
+
+def print_devices(console: Console) -> int:
+    try:
+        from jarvis.voice.audio import list_devices
+
+        listing = list_devices()
+    except ImportError as exc:
+        console.print(Text(voice_install_message(exc.name), style="yellow"))
+        return 2
+    console.print(Text(listing))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8()
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.voice and args.once is not None:
+        parser.error("--voice and --once cannot be combined")
     console = Console()
+    if args.devices:
+        return print_devices(console)
     try:
-        settings = apply_overrides(get_settings(), args.provider, args.model)
+        settings = apply_overrides(get_settings(), args.provider, args.model, args.no_wake)
         app = build_app(settings, force_local=args.local)
     except (ConfigError, ValidationError) as exc:
         Console(stderr=True).print(
@@ -516,6 +567,13 @@ def main(argv: list[str] | None = None) -> int:
         resumed = False if args.new else app.resume()
         if args.once is not None:
             return asyncio.run(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose))
+        if args.voice:
+            try:
+                from jarvis.interfaces.voice import run_voice
+            except ImportError as exc:
+                console.print(Text(voice_install_message(exc.name), style="yellow"))
+                return 2
+            return asyncio.run(run_voice(app, console))
         if args.yes:
             console.print(Text("--yes only applies with --once; ignoring it.", style="yellow"))
         print_banner(console, app, resumed)

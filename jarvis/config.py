@@ -59,6 +59,23 @@ class Settings(BaseSettings):
         alias="JARVIS_LOCAL_TOOL_GROUPS",
     )
 
+    # Voice
+    wake_word: str = Field("jarvis", alias="JARVIS_WAKE_WORD")
+    # False = every utterance is addressed to Jarvis (no wake word needed).
+    require_wake_word: bool = Field(True, alias="JARVIS_REQUIRE_WAKE_WORD")
+    # After Jarvis replies, the user can answer without the wake word for this long.
+    followup_seconds: float = Field(10.0, alias="JARVIS_FOLLOWUP_SECONDS")
+    end_silence_ms: int = Field(650, alias="JARVIS_END_SILENCE_MS")
+    # vad = speaking over Jarvis interrupts it; wake = only "<wake word> ..." interrupts
+    # (use on loud speakers without headphones); off = never.
+    barge_in: str = Field("vad", alias="JARVIS_BARGE_IN")
+    stt_model: str = Field("auto", alias="JARVIS_STT_MODEL")  # auto | tiny.en | base.en | small.en | ...
+    stt_device: str = Field("auto", alias="JARVIS_STT_DEVICE")  # auto | cuda | cpu
+    tts_voice: str = Field("en_GB-alan-medium", alias="JARVIS_TTS_VOICE")
+    tts_speed: float = Field(1.0, alias="JARVIS_TTS_SPEED")
+    input_device: str = Field("", alias="JARVIS_INPUT_DEVICE")  # empty = system default
+    output_device: str = Field("", alias="JARVIS_OUTPUT_DEVICE")
+
     data_dir_override: str = Field("", alias="JARVIS_DATA_DIR")
 
     @property
@@ -74,6 +91,12 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "jarvis.db"
+
+    @property
+    def voices_dir(self) -> Path:
+        path = self.data_dir / "voices"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     @property
     def log_dir(self) -> Path:

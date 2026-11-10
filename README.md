@@ -43,6 +43,9 @@ python -m jarvis                    # same as `jarvis`
 | `--provider NAME` | Override `JARVIS_PROVIDER` for this run |
 | `--model ID` | Override `JARVIS_MODEL` for this run |
 | `--verbose` | Show full tool arguments and a preview of each result |
+| `--voice` | Voice mode (see below) |
+| `--devices` | List audio input/output devices and exit |
+| `--no-wake` | Voice mode: every utterance is addressed to Jarvis, no wake word needed |
 
 If the configuration is invalid, Jarvis says which variable to set in `.env` and exits with code 2.
 
@@ -62,6 +65,53 @@ If the configuration is invalid, Jarvis says which variable to set in `.env` and
 Ctrl+C during a reply cancels it and returns to the prompt. Alt+Enter inserts a newline; pasted multi-line text is sent as one message.
 
 Tools marked `confirm` (deleting or overwriting files, most shell commands, and similar) show what they are about to do and ask `Allow? [y/N]`. The default is No.
+
+## Voice mode
+
+Install the optional dependencies (microphone and speaker access, speech recognition, speech synthesis), then start it:
+
+```powershell
+uv sync --extra voice
+uv run jarvis --voice          # add --no-wake to skip the wake word
+uv run jarvis --devices        # find device names for JARVIS_INPUT_DEVICE / JARVIS_OUTPUT_DEVICE
+```
+
+If the extra is not installed, `--voice` prints this install command and exits with code 2.
+
+The microphone stays open for the whole session. Speech is detected locally, transcribed locally, and the transcript goes to the same agent as typed text; replies are spoken sentence by sentence while the model is still writing the rest. The terminal shows the state (idle, listening, thinking, speaking), live mic and output level meters, what was heard (dimmed when it was not meant for Jarvis), the reply as it is spoken, and tool activity. Ctrl+C quits.
+
+- **Wake word.** With `JARVIS_REQUIRE_WAKE_WORD=true` (the default) an utterance is only acted on if it contains the wake word, for example "Jarvis, what time is it?". Common mis-hearings of "jarvis" ("travis", "jervis") are accepted at the start of a sentence. Saying only "Jarvis" gets a "Yes?" and opens the follow-up window.
+- **Follow-up window.** For `JARVIS_FOLLOWUP_SECONDS` after Jarvis finishes speaking (or after your last command) you can answer without the wake word.
+- **Stopping.** "Stop", "cancel", "never mind", "be quiet" or "shut up" cancels the current reply silently.
+- **Confirmations.** Risky actions are asked aloud ("Shall I go ahead and ...? Say yes or no."). Only a clear yes approves; anything else, silence for 15 seconds, or an unclear transcript means no.
+- **Reminders.** Reminders set through Jarvis are spoken when they fall due (checked every 20 seconds), once Jarvis is idle. In the text interface they are printed.
+
+### Barge-in
+
+`JARVIS_BARGE_IN` decides what happens when you speak while Jarvis is thinking or talking:
+
+| Mode | Behaviour |
+|---|---|
+| `vad` (default) | Speaking over Jarvis interrupts him immediately; what you say becomes the next request without the wake word. Mic input must be louder than the echo expected from the speakers. |
+| `wake` | Only an utterance containing the wake word interrupts. |
+| `off` | The microphone is ignored while Jarvis works or speaks, except for stop phrases. |
+
+`vad` mode works best with headphones. On laptop speakers Jarvis's own voice leaks into the microphone; the echo gate copes with moderate leakage, but if Jarvis keeps cutting himself off or mistaking his voice for yours, use `JARVIS_BARGE_IN=wake`. A false trigger just returns Jarvis to idle; he does not resume the old reply.
+
+### Voice settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `JARVIS_WAKE_WORD` | `jarvis` | The word that addresses Jarvis |
+| `JARVIS_REQUIRE_WAKE_WORD` | `true` | `false` treats every utterance as addressed (same as `--no-wake`) |
+| `JARVIS_FOLLOWUP_SECONDS` | `10` | Follow-up window length |
+| `JARVIS_END_SILENCE_MS` | `650` | Silence that ends an utterance |
+| `JARVIS_BARGE_IN` | `vad` | `vad`, `wake` or `off` |
+| `JARVIS_STT_MODEL` | `auto` | Whisper model: `auto`, `tiny.en`, `base.en`, `small.en`, ... |
+| `JARVIS_STT_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
+| `JARVIS_TTS_VOICE` | `en_GB-alan-medium` | Piper voice |
+| `JARVIS_TTS_SPEED` | `1.0` | Speech speed multiplier |
+| `JARVIS_INPUT_DEVICE`, `JARVIS_OUTPUT_DEVICE` | empty | Device name or index; empty is the system default |
 
 ## Choosing the provider and model
 
@@ -121,7 +171,9 @@ jarvis/
   tools/           @tool decorator, registry, builtin/ tool modules
   memory/          SQLite store: conversations, summaries, facts
   agent/           The agent loop, prompt, context compaction, events
-  interfaces/      app.py (wiring) and cli.py (terminal frontend)
+  interfaces/      app.py (wiring), cli.py (terminal frontend), voice.py (voice frontend)
+  voice/           Audio I/O, VAD, speech-to-text, text-to-speech, the voice session
+  proactive/       Reminder watcher (Jarvis speaking first)
 docs/              Architecture notes
 tests/             pytest suite (no network needed)
 ```
@@ -130,11 +182,9 @@ Run the tests with `uv run pytest`.
 
 ## Roadmap
 
-Phase 2:
+Phase 2 still to come:
 
-- Streaming voice with barge-in
-- A HUD
-- A proactive scheduler, so Jarvis can speak first
+- A HUD (it will consume the `VoiceEvent`s the voice session already emits)
 
 Ports from Friday still to come:
 
