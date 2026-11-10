@@ -180,20 +180,35 @@ tests/             pytest suite (no network needed)
 
 Run the tests with `uv run pytest`.
 
+## Chrome control
+
+Jarvis can browse in your own Chrome, signed in as you, through the Jarvis Browser Control extension. It can open pages, read them, list their links, buttons and fields, click, type, fill forms, scroll, take screenshots and attach files. It only ever touches tabs in a cyan tab group named **JARVIS**; your other tabs are never read or changed.
+
+Set up once:
+
+1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extensions/jarvis-browser-control` folder.
+2. Run `jarvis --browser-token`. It prints the pairing token and the folder path.
+3. Click the extension's toolbar icon, paste the token, leave the port at `8765` (match `JARVIS_BROWSER_PORT` if you changed it) and click **Save and connect**.
+
+Jarvis starts listening (on `127.0.0.1` only, for `chrome-extension://` origins, with the token required) the first time it uses a browser tool, and the extension reconnects on its own after that. Ask Jarvis "is Chrome connected?" to check; if it is not, it tells you what to do. If the port is taken, change `JARVIS_BROWSER_PORT` and the port in the popup.
+
+Safety policy: reading, navigating, scrolling, clicking and typing run without asking. Jarvis asks you first before anything consequential: buying or paying, sending or posting, deleting, signing in or authorising, account or security changes, accepting terms, and uploading a file. It will not type into password, card number, CVV, one-time-code or similar fields at all; you enter those yourself. Only `http` and `https` pages are opened. Page text is treated as data, never as instructions.
+
+While Jarvis clicks or types, Chrome shows a "Jarvis Browser Control started debugging this browser" banner; it disappears when the action finishes. That is how real mouse and keyboard events are sent.
+
+## Documents, spreadsheets and the screen
+
+Installed with `uv sync --all-extras` (or `--extra office --extra screen`).
+
+- **Documents:** read PDF, Word, Markdown and HTML; create Markdown, HTML, PDF or Word documents; merge, split, extract, rotate and fill PDFs. New files only: nothing existing is overwritten.
+- **Excel:** overview, read ranges, write cells and formulas, append rows, create workbooks, column totals and lookups. Writes to an existing workbook ask first and keep a `.bak`. openpyxl cannot calculate formulas, so a formula's value appears when the file is next opened in Excel.
+- **Screen:** `read_screen_text` runs OCR locally (about 5 s for a 1080p screen). `look_at_screen` and `describe_image` send the image to a vision model. By default that is a hosted model on the configured key, falling back to the local Ollama vision model; set `JARVIS_VISION_PROVIDER=local` to keep images on this machine.
+
 ## Roadmap
 
-Phase 2 still to come:
-
 - A HUD (it will consume the `VoiceEvent`s the voice session already emits)
-
-Ports from Friday still to come:
-
-- Documents / PDF
-- Excel
-- Screen vision and OCR
-- Chrome extension bridge
-
-None of these exist yet.
+- Keyboard and window control for desktop apps
+- Email and calendar
 
 ## Credits
 

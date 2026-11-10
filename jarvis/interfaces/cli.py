@@ -504,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verbose", action="store_true", help="show tool arguments and result previews")
     p.add_argument("--voice", action="store_true", help="talk to Jarvis: always-open microphone and spoken replies")
     p.add_argument("--devices", action="store_true", help="list audio devices and exit")
+    p.add_argument("--browser-token", action="store_true", help="print the Chrome extension pairing token and folder, then exit")
     p.add_argument("--no-wake", action="store_true", help="voice: treat every utterance as addressed to Jarvis")
     return p
 
@@ -545,12 +546,39 @@ def print_devices(console: Console) -> int:
     return 0
 
 
+def print_browser_token() -> int:
+    """Print what the user needs to pair the Chrome extension (plain stdout, so it can be copied)."""
+    from jarvis.browser.bridge import extension_dir, load_or_create_token
+
+    settings = get_settings()
+    print(f"Pairing token: {load_or_create_token(settings)}")
+    print(f"Extension folder: {extension_dir()}")
+    print(f"Bridge port: {settings.browser_bridge_port}")
+    print("Load the folder at chrome://extensions (Developer mode, Load unpacked), then paste the token in its popup.")
+    return 0
+
+
+async def _with_cleanup(main: Any) -> int:
+    """Run a frontend, then stop background services in the loop that started them."""
+    try:
+        return await main
+    finally:
+        try:
+            from jarvis.browser.bridge import shutdown as shutdown_bridge
+        except ImportError:  # the browser extra is not installed
+            pass
+        else:
+            await shutdown_bridge()
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.voice and args.once is not None:
         parser.error("--voice and --once cannot be combined")
+    if args.browser_token:
+        return print_browser_token()
     console = Console()
     if args.devices:
         return print_devices(console)
@@ -566,18 +594,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         resumed = False if args.new else app.resume()
         if args.once is not None:
-            return asyncio.run(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose))
+            return asyncio.run(_with_cleanup(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose)))
         if args.voice:
             try:
                 from jarvis.interfaces.voice import run_voice
             except ImportError as exc:
                 console.print(Text(voice_install_message(exc.name), style="yellow"))
                 return 2
-            return asyncio.run(run_voice(app, console))
+            return asyncio.run(_with_cleanup(run_voice(app, console)))
         if args.yes:
             console.print(Text("--yes only applies with --once; ignoring it.", style="yellow"))
         print_banner(console, app, resumed)
-        return asyncio.run(_interactive_main(app, console, args.verbose))
+        return asyncio.run(_with_cleanup(_interactive_main(app, console, args.verbose)))
     except KeyboardInterrupt:
         return 130
     finally:

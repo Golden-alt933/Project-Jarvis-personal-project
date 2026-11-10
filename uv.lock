@@ -433,6 +433,7 @@ office = [
     { name = "markdown" },
     { name = "openpyxl" },
     { name = "pypdf" },
+    { name = "python-docx" },
     { name = "xhtml2pdf" },
 ]
 screen = [
@@ -488,6 +489,7 @@ requires-dist = [
     { name = "pygetwindow", marker = "extra == 'windows'", specifier = ">=0.0.9" },
     { name = "pypdf", marker = "extra == 'office'", specifier = ">=5.0" },
     { name = "pyperclip", specifier = ">=1.9" },
+    { name = "python-docx", marker = "extra == 'office'", specifier = ">=1.2.0" },
     { name = "pywinauto", marker = "extra == 'windows'", specifier = ">=0.6.8" },
     { name = "rapidocr-onnxruntime", marker = "extra == 'screen'", specifier = ">=1.4" },
     { name = "rich", specifier = ">=13.9" },
@@ -1025,6 +1027,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/73/7f/c60a4338420b33453d4f814ac0c930abd399f162b9bdd21af4b9e363037f/pytest_asyncio-1.4.1.post1.tar.gz", hash = "sha256:f582d9ea4a1c082195abe8bd29a1fe106aeb1cd435e3dad2d3bc2749935c36a2", size = 145360, upload-time = "2026-11-01T18:26:03.732Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/de/adbc7578959cfab07e5e7c05cf6d54224a51e7667ea2c07458b6bc571e75/pytest_asyncio-1.4.1.post1-py3-none-any.whl", hash = "sha256:0755e488cc0a2b9bd2eab7292cc6390d4cbb8390f1020745647bae5a708e0165", size = 17140, upload-time = "2026-11-01T18:26:02.168Z" },
+]
+
+[[package]]
+name = "python-docx"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "lxml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce", size = 5723256, upload-time = "2025-06-16T20:46:27.921Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7", size = 252987, upload-time = "2025-06-16T20:46:22.506Z" },
 ]
 
 [[package]]

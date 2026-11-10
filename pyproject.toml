@@ -21,7 +21,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # Heavier capability packs, installed with: uv sync --extra office --extra screen
-office = ["openpyxl>=3.1", "pypdf>=5.0", "markdown>=3.7", "xhtml2pdf>=0.2.16"]
+office = [
+    "openpyxl>=3.1",
+    "pypdf>=5.0",
+    "markdown>=3.7",
+    "xhtml2pdf>=0.2.16",
+    "python-docx>=1.2.0",
+]
 screen = ["mss>=10.0", "pillow>=11.0", "rapidocr-onnxruntime>=1.4"]
 browser = ["websockets>=15"]
 voice = [
@@ -52,3 +58,4 @@ packages = ["jarvis"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = ["slow: loads real models; runs only with JARVIS_SLOW_TESTS=1"]

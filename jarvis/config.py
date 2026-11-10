@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     input_device: str = Field("", alias="JARVIS_INPUT_DEVICE")  # empty = system default
     output_device: str = Field("", alias="JARVIS_OUTPUT_DEVICE")
 
+    # Screen vision
+    # auto = hosted vision model if one works on the configured key, else local Ollama;
+    # local = images never leave this machine.
+    vision_provider: str = Field("auto", alias="JARVIS_VISION_PROVIDER")  # auto | cloud | local
+    vision_model: str = Field("", alias="JARVIS_VISION_MODEL")  # empty = provider default
+    ollama_vision_model: str = Field("qwen2.5vl:3b", alias="OLLAMA_VISION_MODEL")
+
+    # Chrome extension bridge (loopback only)
+    browser_bridge_port: int = Field(8765, alias="JARVIS_BROWSER_PORT")
+
     data_dir_override: str = Field("", alias="JARVIS_DATA_DIR")
 
     @property

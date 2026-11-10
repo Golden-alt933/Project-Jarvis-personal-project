@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Jarvis Browser Control</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 16px; min-width: 300px; }
+      h1 { font-size: 16px; margin: 0 0 10px; }
+      #status { margin-bottom: 6px; font-weight: 600; }
+      #details { color: #555; font-size: 12px; margin-bottom: 12px; overflow-wrap: anywhere; white-space: pre-line; }
+      label { display: block; font-size: 12px; margin: 8px 0 3px; color: #333; }
+      input { box-sizing: border-box; width: 100%; padding: 6px 8px; font: inherit; }
+      .row { display: flex; gap: 8px; margin-top: 12px; }
+      button { border: 0; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+      #hint { color: #777; font-size: 11px; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Jarvis Browser Control</h1>
+    <div id="status">Checking the local connection...</div>
+    <div id="details"></div>
+    <label for="port">Bridge port</label>
+    <input id="port" type="number" min="1" max="65535" value="8765" />
+    <label for="token">Pairing token</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the token from: jarvis --browser-token" />
+    <div class="row">
+      <button id="save" type="button">Save and connect</button>
+      <button id="reconnect" type="button">Reconnect</button>
+    </div>
+    <div id="hint">The token never leaves this browser profile and is only sent to 127.0.0.1.</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

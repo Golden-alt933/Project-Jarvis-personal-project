@@ -41,13 +41,23 @@ jarvis/
     loop.py            Agent: the only control flow
   interfaces/
     app.py             build_app(settings) wires store + registry + clients + agent
-    cli.py             Streaming terminal chat (phase 1 frontend)
+    cli.py             Streaming terminal chat
+    voice.py           Voice frontend (status display over VoiceEvents)
+  voice/               types.py (contracts), audio.py, vad.py, stt.py, tts.py, session.py
+  vision/              capture.py, ocr.py (local RapidOCR), client.py (hosted or local vision model)
+  browser/             bridge.py (loopback WebSocket server), policy.py (which page actions ask first)
+  proactive/           scheduler.py (reminders that fire without being asked)
+extensions/
+  jarvis-browser-control/   Chrome extension paired with the bridge by a token
 ```
 
-Phase 2 adds `interfaces/voice.py` (always-open mic, streaming STT, sentence-streamed
-TTS, barge-in), a HUD, and `proactive/` (scheduler that lets Jarvis speak first).
+Data that leaves the machine: every model call sends the conversation and tool results
+to the configured provider. `look_at_screen` and `describe_image` additionally send the
+image unless `JARVIS_VISION_PROVIDER=local`. OCR, speech recognition and speech synthesis
+are always local.
+
 Frontends only consume `AgentEvent`s and supply `confirm`/`notify` callbacks, so the
-agent needs no change for them.
+agent needs no change for a new one (a HUD is the next).
 
 ## Contracts
 
