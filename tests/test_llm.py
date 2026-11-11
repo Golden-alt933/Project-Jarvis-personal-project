@@ -691,6 +691,9 @@ def test_loopback_detection():
 
 def test_find_exe_prefers_path_then_local_appdata(monkeypatch, tmp_path):
     monkeypatch.undo()  # drop the autouse stubs for this pure-function test
+    from jarvis import platform as plat
+
+    plat.set_backend(plat.create("win32"))  # LOCALAPPDATA is a Windows location (restored by conftest)
     monkeypatch.setattr(ollama_mod.shutil, "which", lambda name: "C:/bin/ollama.exe")
     assert ollama_mod.find_ollama_exe() == "C:/bin/ollama.exe"
     monkeypatch.setattr(ollama_mod.shutil, "which", lambda name: None)

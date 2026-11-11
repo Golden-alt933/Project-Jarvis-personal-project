@@ -1,30 +1,22 @@
 """System tools: time, machine status, apps, volume, media keys, clipboard, lock.
 
-Only the standard library, psutil and pyperclip are used. Windows-specific
-features go through ctypes, winreg-free file scans, or PowerShell, so this
-module always imports (on any OS) and individual tools fail cleanly instead.
-
-Volume note: master volume is driven by a small C# COM interop snippet compiled
-by PowerShell (``Add-Type``) against the Core Audio ``IAudioEndpointVolume``
-interface. It needs no extra Python packages, reads and sets an exact percent,
-and takes roughly 1-2 seconds per call because of the compile step.
+Everything that differs between operating systems (launching apps, windows, volume,
+media keys, locking, the clipboard check) lives in ``jarvis.platform``; this module only
+decides what to ask and how to word the answer, so it imports and behaves the same on
+every OS. When the platform cannot do something the backend raises PlatformUnsupported
+with a message that names what to install, and the tool reports it as its failure.
 """
 
 from __future__ import annotations
 
-import base64
-import ctypes
 import difflib
-import json
 import logging
 import os
 import re
 import shutil
 import socket
 import subprocess
-import sys
 import time
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -32,29 +24,19 @@ from urllib.parse import urlparse
 
 import psutil
 
+from jarvis import platform as plat
+from jarvis.platform.base import JUNK_NAME, AppEntry
 from jarvis.tools.base import Risk, ToolResult, tool
 
 log = logging.getLogger(__name__)
 
-_IS_WINDOWS = sys.platform == "win32"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_JUNK = JUNK_NAME
 
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
-def _powershell(script: str, timeout: float = 20.0) -> subprocess.CompletedProcess[str]:
-    """Run a PowerShell script (passed encoded, so no quoting problems)."""
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        creationflags=_NO_WINDOW,
-    )
-
-
 def _gb(n: float) -> str:
     return f"{n / 1024**3:.1f} GB"
 
@@ -178,110 +160,8 @@ def system_status() -> ToolResult:
 # --------------------------------------------------------------------------
 # apps: catalog, fuzzy resolve, launch
 # --------------------------------------------------------------------------
-class AppEntry:
-    """One launchable thing. kind: 'lnk' (shortcut path), 'uwp' (AppID), 'exe' (command),
-    'webapp' (a shortcut that opens a site in a browser window, e.g. a Chrome app)."""
-
-    __slots__ = ("name", "kind", "target")
-
-    def __init__(self, name: str, kind: str, target: str) -> None:
-        self.name, self.kind, self.target = name, kind, target
-
-    def __repr__(self) -> str:  # for debugging and test failures
-        return f"AppEntry({self.name!r}, {self.kind!r})"
-
-
-# Shortcut names that are never what someone means by "open X".
-_JUNK = re.compile(
-    r"\b(uninstall|readme|release notes|license|documentation|help|manual|website|"
-    r"changelog|repair|updater?|configure|setup)\b",
-    re.IGNORECASE,
-)
-
-# Executables that exist on a stock Windows install, reachable by name.
-_COMMON_EXES: dict[str, str] = {
-    "notepad": "notepad.exe",
-    "calculator": "calc.exe",
-    "paint": "mspaint.exe",
-    "command prompt": "cmd.exe",
-    "task manager": "taskmgr.exe",
-    "file explorer": "explorer.exe",
-    "snipping tool": "snippingtool.exe",
-    "control panel": "control.exe",
-    "registry editor": "regedit.exe",
-    "wordpad": "write.exe",
-}
-
 _catalog_cache: tuple[float, list[AppEntry]] | None = None
 _CATALOG_TTL = 600.0
-
-
-def _start_menu_dirs() -> list[Path]:
-    roots = [os.environ.get("PROGRAMDATA"), os.environ.get("APPDATA")]
-    return [
-        Path(r) / "Microsoft" / "Windows" / "Start Menu" / "Programs" for r in roots if r
-    ]
-
-
-# Browsers install site shortcuts ("Calculator", "YouTube") that launch through these.
-_BROWSER_LAUNCHERS = ("chrome_proxy.exe", "msedge_proxy.exe", "brave_proxy.exe")
-
-
-_BROWSER_APP_ID = re.compile(r"(chrome|msedge|brave|chromium)\._crx_", re.IGNORECASE)
-
-
-def _is_webapp_shortcut(path: Path) -> bool:
-    """True if the .lnk opens a website in a browser window rather than a real app.
-    The target path is stored in the file as ANSI and/or UTF-16, so a byte search is enough."""
-    if any(part.lower().endswith(" apps") for part in path.parts[-3:-1]):
-        return True  # e.g. Start Menu\Programs\Chrome Apps
-    try:
-        raw = path.read_bytes()[:8192].lower()
-    except OSError:
-        return False
-    return any(n.encode() in raw or n.encode("utf-16-le") in raw for n in _BROWSER_LAUNCHERS)
-
-
-def _scan_shortcuts(dirs: list[Path]) -> list[AppEntry]:
-    found: dict[str, AppEntry] = {}
-    for base in dirs:
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*.lnk"):
-            name = path.stem
-            if _JUNK.search(name):
-                continue
-            kind = "webapp" if _is_webapp_shortcut(path) else "lnk"
-            key = name.lower()
-            if key not in found or (found[key].kind == "webapp" and kind == "lnk"):
-                found[key] = AppEntry(name, kind, str(path))
-    return list(found.values())
-
-
-def _scan_uwp() -> list[AppEntry]:
-    if not _IS_WINDOWS:
-        return []
-    try:
-        out = _powershell("Get-StartApps | ConvertTo-Json -Compress", timeout=25)
-        data = json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else []
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        log.warning("Get-StartApps failed", exc_info=True)
-        return []
-    if isinstance(data, dict):
-        data = [data]
-    entries = []
-    for item in data:
-        name, app_id = item.get("Name"), item.get("AppID")
-        if name and app_id and not _JUNK.search(name):
-            # Get-StartApps also lists browser site shortcuts ("Chrome._crx_…"), often
-            # with the same name as a real app and ahead of it.
-            kind = "webapp" if _BROWSER_APP_ID.match(app_id) else "uwp"
-            entries.append(AppEntry(name, kind, app_id))
-    return entries
-
-
-def _common_exes() -> list[AppEntry]:
-    return [AppEntry(n.title(), "exe", exe) for n, exe in _COMMON_EXES.items()]
 
 
 def _catalog(refresh: bool = False) -> list[AppEntry]:
@@ -292,7 +172,11 @@ def _catalog(refresh: bool = False) -> list[AppEntry]:
     # Real installs first so they win over a same-named Store or stock entry. Browser
     # site shortcuts go last and keep a distinct name: a Chrome shortcut called
     # "Calculator" must never be what "open calculator" launches.
-    found = _scan_shortcuts(_start_menu_dirs()) + _scan_uwp() + _common_exes()
+    try:
+        found = [e for e in plat.current().scan_apps() if not _JUNK.search(e.name)]
+    except OSError:
+        log.warning("app scan failed", exc_info=True)
+        found = []
     merged: dict[str, AppEntry] = {}
     for entry in (e for e in found if e.kind != "webapp"):
         merged.setdefault(entry.name.lower(), entry)
@@ -340,10 +224,7 @@ def resolve_app(name: str, entries: list[AppEntry]) -> tuple[AppEntry | None, li
 
 
 def _launch(entry: AppEntry) -> None:
-    if not entry.target.lower().endswith((".lnk", ".exe")):  # a Start-menu AppID
-        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{entry.target}"], creationflags=_NO_WINDOW)
-    else:
-        os.startfile(entry.target)  # type: ignore[attr-defined]  # Windows only
+    plat.current().launch_app(entry)
 
 
 _LAUNCH_WAIT = 5.0
@@ -370,8 +251,8 @@ def _wait_for_new_window(before: set[tuple[str, str]]) -> str | None:
 
 @tool(group="system", timeout=40)
 def list_installed_apps(query: str | None = None) -> ToolResult:
-    """List applications that can be opened by name (Start Menu apps, Store apps
-    and common Windows tools).
+    """List applications that can be opened by name (Start Menu and Store apps on
+    Windows, desktop-menu applications on Linux).
 
     Use to discover an exact app name, or to check whether something is
     installed. Returns up to 40 names, best matches first when a query is given.
@@ -405,8 +286,6 @@ def open_app(name: str) -> ToolResult:
     Args:
         name: The app's name as a person would say it.
     """
-    if not _IS_WINDOWS:
-        return ToolResult.fail("opening apps is only supported on Windows")
     best, candidates = resolve_app(name, _catalog())
     if best is None:
         # The cache may be stale (app just installed): rescan once before giving up.
@@ -429,7 +308,7 @@ def open_app(name: str) -> ToolResult:
         text = f"Launched {best.name} ({what}). New window: {opened}."
     else:
         text = (
-            f"Asked Windows to launch {best.name} ({what}), but no new window appeared within "
+            f"Asked the system to launch {best.name} ({what}), but no new window appeared within "
             f"{_LAUNCH_WAIT:.0f} s. It may still be starting, or it reused an existing window."
         )
     return ToolResult.success(text, data={"app": best.name, "kind": best.kind, "window": opened})
@@ -442,34 +321,9 @@ def _visible_windows() -> list[tuple[str, str, int]]:
 
 
 def _windows() -> list[tuple[str, str, int, int]]:
-    """(process name, window title, pid, window handle) for each top-level visible window."""
-    if not _IS_WINDOWS:
-        return []
-    user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
-    results: list[tuple[str, str, int, int]] = []
-    enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def callback(hwnd: int, _: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        cloaked = ctypes.c_int(0)  # DWMWA_CLOAKED: hidden UWP shells and other virtual-desktop windows
-        dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
-        length = user32.GetWindowTextLengthW(hwnd)
-        if cloaked.value or length == 0:
-            return True
-        buf = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buf, length + 1)
-        pid = ctypes.c_ulong()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        try:
-            proc = psutil.Process(pid.value).name()
-        except psutil.Error:
-            return True
-        results.append((proc, buf.value, pid.value, int(hwnd or 0)))
-        return True
-
-    user32.EnumWindows(enum_proc(callback), 0)
-    return results
+    """(process name, window title, pid, window handle) for each top-level visible window.
+    Raises OSError (PlatformUnsupported) where windows cannot be listed."""
+    return list(plat.current().windows())
 
 
 @tool(group="system")
@@ -480,10 +334,12 @@ def list_running_apps() -> ToolResult:
     Use to see what the user has open, or to find the exact name before
     close_app. Returns one line per process.
     """
-    if not _IS_WINDOWS:
-        return ToolResult.fail("listing windows is only supported on Windows")
+    try:
+        visible = _visible_windows()
+    except OSError as exc:
+        return ToolResult.fail(f"cannot list windows: {exc}")
     by_proc: dict[str, list[str]] = {}
-    for proc, title, _pid in _visible_windows():
+    for proc, title, _pid in visible:
         by_proc.setdefault(proc, []).append(title)
     if not by_proc:
         return ToolResult.success("No visible application windows.", data={})
@@ -494,8 +350,6 @@ def list_running_apps() -> ToolResult:
 # Processes that host windows belonging to many different apps. Matching these by
 # process name, or closing the process, would hit every app they host.
 _SHARED_HOSTS = {"applicationframehost.exe", "explorer.exe", "systemsettings.exe"}
-_NEVER_CLOSE_TITLES = {"program manager"}  # the desktop shell itself
-_WM_CLOSE = 0x0010
 _TITLE_SEPARATOR = re.compile(r"\s+[-–—|]\s+")
 
 
@@ -515,10 +369,11 @@ def _match_windows(
     title, such as a browser tab about calculators, is not a match.
     """
     wanted = _norm(name)
+    never = plat.current().never_close_titles()
     matched = []
     for window in windows:
         proc, title = window[0], window[1]
-        if _norm(title) in _NEVER_CLOSE_TITLES:
+        if _norm(title) in never:
             continue
         by_process = (
             proc.lower() not in _SHARED_HOSTS and _score(wanted, _norm(Path(proc).stem)) >= 0.72
@@ -530,7 +385,7 @@ def _match_windows(
 
 
 def _post_close(hwnd: int) -> None:
-    ctypes.windll.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+    plat.current().close_window(hwnd)
 
 
 def _open_handles() -> set[int]:
@@ -553,9 +408,10 @@ def close_app(name: str) -> ToolResult:
     Args:
         name: App name as a person would say it, for example "notepad" or "Chrome".
     """
-    if not _IS_WINDOWS:
-        return ToolResult.fail("closing apps is only supported on Windows")
-    windows = _windows()
+    try:
+        windows = _windows()
+    except OSError as exc:
+        return ToolResult.fail(f"cannot close apps: {exc}")
     targets = _match_windows(name, windows)
     if not targets:
         open_now = sorted({f"{t} ({p})" for p, t, _, _ in windows})[:12]
@@ -563,8 +419,11 @@ def close_app(name: str) -> ToolResult:
             f"no open window belongs to an app called '{name}'",
             "Open windows: " + ("; ".join(open_now) or "none"),
         )
-    for _, _, _, hwnd in targets:
-        _post_close(hwnd)
+    try:
+        for _, _, _, hwnd in targets:
+            _post_close(hwnd)
+    except OSError as exc:
+        return ToolResult.fail(f"could not close {name}: {exc}")
     deadline = time.monotonic() + 4
     remaining = targets
     while time.monotonic() < deadline:
@@ -590,56 +449,14 @@ def close_app(name: str) -> ToolResult:
 # --------------------------------------------------------------------------
 # volume and media keys
 # --------------------------------------------------------------------------
-_AUDIO_CS = r"""
-using System;
-using System.Runtime.InteropServices;
-[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IAudioEndpointVolume {
-  int a(); int b(); int c(); int d();
-  int SetMasterVolumeLevelScalar(float level, Guid ctx);
-  int e();
-  int GetMasterVolumeLevelScalar(out float level);
-  int f(); int g(); int h(); int i();
-  int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, Guid ctx);
-  int GetMute(out bool mute);
-}
-[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDevice { int Activate(ref Guid id, int clsCtx, IntPtr p, out IAudioEndpointVolume v); }
-[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDeviceEnumerator { int f(); int GetDefaultAudioEndpoint(int flow, int role, out IMMDevice d); }
-[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorComObject { }
-public class JarvisAudio {
-  static IAudioEndpointVolume Ep() {
-    var en = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
-    IMMDevice dev; en.GetDefaultAudioEndpoint(0, 1, out dev);
-    Guid iid = typeof(IAudioEndpointVolume).GUID; IAudioEndpointVolume v;
-    dev.Activate(ref iid, 23, IntPtr.Zero, out v); return v;
-  }
-  public static string Get() { float l; bool m; var v = Ep(); v.GetMasterVolumeLevelScalar(out l); v.GetMute(out m);
-    return ((int)Math.Round(l * 100)).ToString() + "," + (m ? "1" : "0"); }
-  public static void SetLevel(int pct) { Ep().SetMasterVolumeLevelScalar(pct / 100f, Guid.Empty); }
-  public static void SetMute(bool m) { Ep().SetMute(m, Guid.Empty); }
-}
-"""
-
-
-def _audio(action: str) -> tuple[int, bool]:
-    """Run an audio action ('Get()', 'SetLevel(40)', 'SetMute($true)'); return (percent, muted)."""
-    if not _IS_WINDOWS:
-        raise OSError("volume control is only supported on Windows")
-    script = (
-        "$ProgressPreference = 'SilentlyContinue'\n"  # else stderr fills with CLIXML noise
-        f"$src = @'\n{_AUDIO_CS}\n'@\n"
-        "Add-Type -TypeDefinition $src\n"
-        f"[JarvisAudio]::{action}\n"
-        "[JarvisAudio]::Get()"
-    )
-    out = _powershell(script, timeout=25)
-    last = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
-    if out.returncode != 0 or not re.fullmatch(r"\d+,[01]", last):
-        raise OSError((out.stderr or out.stdout or "no audio endpoint").strip()[:200])
-    pct, muted = last.split(",")
-    return int(pct), muted == "1"
+def _audio(action: str, *args: object) -> tuple[int, bool]:
+    """Volume through the platform backend: action is get, set or mute. Returns (percent, muted)."""
+    backend = plat.current()
+    if action == "get":
+        return backend.get_volume()
+    if action == "set":
+        return backend.set_volume(int(args[0]))  # type: ignore[arg-type]
+    return backend.set_mute(bool(args[0]))
 
 
 def _volume_text(pct: int, muted: bool) -> str:
@@ -654,7 +471,7 @@ def get_volume() -> ToolResult:
     it". Read-only.
     """
     try:
-        pct, muted = _audio("Get()")
+        pct, muted = _audio("get")
     except (OSError, subprocess.SubprocessError) as exc:
         return ToolResult.fail(f"could not read volume: {exc}")
     return ToolResult.success(_volume_text(pct, muted), data={"percent": pct, "muted": muted})
@@ -673,7 +490,7 @@ def set_volume(percent: int) -> ToolResult:
     if not 0 <= percent <= 100:
         return ToolResult.fail(f"percent must be 0-100, got {percent}")
     try:
-        pct, muted = _audio(f"SetLevel({int(percent)})")
+        pct, muted = _audio("set", int(percent))
     except (OSError, subprocess.SubprocessError) as exc:
         return ToolResult.fail(f"could not set volume: {exc}")
     return ToolResult.success(_volume_text(pct, muted), data={"percent": pct, "muted": muted})
@@ -687,19 +504,10 @@ def set_mute(muted: bool) -> ToolResult:
         muted: True to mute, False to unmute.
     """
     try:
-        pct, now_muted = _audio(f"SetMute(${'true' if muted else 'false'})")
+        pct, now_muted = _audio("mute", muted)
     except (OSError, subprocess.SubprocessError) as exc:
         return ToolResult.fail(f"could not change mute: {exc}")
     return ToolResult.success(_volume_text(pct, now_muted), data={"percent": pct, "muted": now_muted})
-
-
-_MEDIA_VK = {"play_pause": 0xB3, "next": 0xB0, "previous": 0xB1, "stop": 0xB2}
-
-
-def _press_key(vk: int) -> None:
-    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-    user32.keybd_event(vk, 0, 0, 0)
-    user32.keybd_event(vk, 0, 2, 0)  # KEYEVENTF_KEYUP
 
 
 @tool(group="system")
@@ -707,16 +515,14 @@ def media_key(action: Literal["play_pause", "next", "previous", "stop"]) -> Tool
     """Send a media key to whatever player is active (Spotify, YouTube in a
     browser, VLC, ...): play/pause, next track, previous track or stop.
 
-    The key goes to the system, not a specific app, and Windows gives no
-    feedback on whether a player reacted.
+    The key goes to the system (on Linux, to the active MPRIS player), and there
+    is usually no feedback on whether a player reacted.
 
     Args:
         action: One of play_pause, next, previous, stop.
     """
-    if not _IS_WINDOWS:
-        return ToolResult.fail("media keys are only supported on Windows")
     try:
-        _press_key(_MEDIA_VK[action])
+        plat.current().media_key(action)
     except OSError as exc:
         return ToolResult.fail(f"could not send media key: {exc}")
     return ToolResult.success(f"Sent media key: {action}.")
@@ -734,6 +540,8 @@ def get_clipboard() -> ToolResult:
     """
     import pyperclip
 
+    if problem := plat.current().clipboard_problem():
+        return ToolResult.fail(f"clipboard unavailable: {problem}")
     try:
         text = pyperclip.paste()
     except pyperclip.PyperclipException as exc:
@@ -752,6 +560,8 @@ def set_clipboard(text: str) -> ToolResult:
     """
     import pyperclip
 
+    if problem := plat.current().clipboard_problem():
+        return ToolResult.fail(f"clipboard unavailable: {problem}")
     try:
         pyperclip.copy(text)
     except pyperclip.PyperclipException as exc:
@@ -759,28 +569,21 @@ def set_clipboard(text: str) -> ToolResult:
     return ToolResult.success(f"Copied {len(text)} characters to the clipboard.")
 
 
-def _lock_workstation() -> None:
-    if not ctypes.windll.user32.LockWorkStation():  # type: ignore[attr-defined]
-        raise OSError("LockWorkStation failed")
-
-
 @tool(group="system", risk=Risk.CONFIRM, describe=lambda a: "Lock the screen")
 def lock_screen() -> ToolResult:
-    """Lock the Windows session (the user must sign in again to continue).
+    """Lock the screen (the user must sign in again to continue).
 
     Use only when the user asks to lock the computer.
     """
-    if not _IS_WINDOWS:
-        return ToolResult.fail("locking is only supported on Windows")
     try:
-        _lock_workstation()
+        plat.current().lock_screen()
     except OSError as exc:
         return ToolResult.fail(f"could not lock the screen: {exc}")
     return ToolResult.success("Screen locked.")
 
 
 def _open_in_browser(url: str) -> bool:
-    return webbrowser.open(url)
+    return plat.current().open_url(url)
 
 
 @tool(group="system")
@@ -799,6 +602,10 @@ def open_url(url: str) -> ToolResult:
             f"only http and https URLs can be opened, got '{url[:80]}'",
             "Include the scheme, for example https://example.com",
         )
-    if not _open_in_browser(url.strip()):
+    try:
+        opened = _open_in_browser(url.strip())
+    except OSError as exc:
+        return ToolResult.fail(f"cannot open the URL: {exc}")
+    if not opened:
         return ToolResult.fail("no default browser accepted the URL")
     return ToolResult.success(f"Opened {url.strip()} in the default browser.")

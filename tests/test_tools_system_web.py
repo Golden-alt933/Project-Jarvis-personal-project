@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from jarvis.platform import PlatformUnsupported
 from jarvis.tools.base import Risk, ToolContext
 from jarvis.tools.builtin import productivity as prod
 from jarvis.tools.builtin import system, web
@@ -502,9 +503,11 @@ def test_resolve_app_no_match_gives_candidates():
 
 
 @pytest.fixture
-def windows(monkeypatch):
-    monkeypatch.setattr(system, "_IS_WINDOWS", True)
+def windows(monkeypatch, fake_platform):
+    """A fake OS backend plus a fixed app catalogue (the name is historical: the tests below
+    are platform-neutral and run identically on every OS)."""
     monkeypatch.setattr(system, "_catalog", lambda refresh=False: APPS)
+    return fake_platform
 
 
 def test_open_app_launches_best_match(monkeypatch, windows):
@@ -528,13 +531,19 @@ def test_open_app_launch_error(monkeypatch, windows):
     assert not system.open_app("notepad").ok
 
 
-def test_launch_dispatch(monkeypatch):
-    calls = {}
-    monkeypatch.setattr(system.os, "startfile", lambda p: calls.setdefault("start", p), raising=False)
-    monkeypatch.setattr(system.subprocess, "Popen", lambda args, **k: calls.setdefault("popen", args))
-    system._launch(system.AppEntry("A", "lnk", "x.lnk"))
-    system._launch(system.AppEntry("S", "uwp", "Pkg!App"))
-    assert calls["start"] == "x.lnk" and calls["popen"][1] == "shell:AppsFolder\\Pkg!App"
+def test_launch_delegates_to_the_platform(fake_platform):
+    entry = system.AppEntry("A", "lnk", "x.lnk")
+    system._launch(entry)
+    assert fake_platform.launched == [entry]
+
+
+def test_open_app_reports_unsupported_platform(monkeypatch, windows):
+    def refuse(entry):
+        raise PlatformUnsupported("opening apps is not supported here")
+
+    monkeypatch.setattr(windows, "launch_app", refuse)
+    r = system.open_app("chrome")
+    assert not r.ok and "not supported here" in r.content
 
 
 def test_list_installed_apps_query(monkeypatch, windows):
@@ -543,12 +552,19 @@ def test_list_installed_apps_query(monkeypatch, windows):
     assert "Spotify" in system.list_installed_apps().content
 
 
-def test_scan_shortcuts_filters_junk(tmp_path):
-    (tmp_path / "Sub").mkdir()
-    for name in ("Spotify.lnk", "Sub/Uninstall Foo.lnk", "Sub/Foo Readme.lnk", "Sub/Foo.lnk"):
-        (tmp_path / name).write_text("")
-    names = sorted(e.name for e in system._scan_shortcuts([tmp_path]))
-    assert names == ["Foo", "Spotify"]
+def test_catalog_drops_junk_entries_and_survives_scan_errors(fake_platform):
+    fake_platform.apps = [
+        system.AppEntry("Foo", "lnk", "foo.lnk"),
+        system.AppEntry("Uninstall Foo", "lnk", "u.lnk"),
+        system.AppEntry("Foo Readme", "lnk", "r.lnk"),
+    ]
+    assert [e.name for e in system._catalog(refresh=True)] == ["Foo"]
+
+    def boom():
+        raise OSError("scan failed")
+
+    fake_platform.scan_apps = boom
+    assert system._catalog(refresh=True) == []
 
 
 # -- close_app
@@ -627,50 +643,67 @@ def test_close_app_never_kills_a_process(monkeypatch, windows):
 
 
 # -- volume, media, lock, clipboard, url
-def _ps(stdout, code=0):
-    return lambda script, timeout=20.0: subprocess.CompletedProcess([], code, stdout, "")
-
-
-def test_set_volume(monkeypatch, windows):
-    scripts = []
-
-    def ps(script, timeout=20.0):
-        scripts.append(script)
-        return subprocess.CompletedProcess([], 0, "40,0\n", "")
-
-    monkeypatch.setattr(system, "_powershell", ps)
+def test_set_volume(windows):
     r = system.set_volume(40)
-    assert r.ok and r.data == {"percent": 40, "muted": False} and "SetLevel(40)" in scripts[0]
+    assert r.ok and r.data == {"percent": 40, "muted": False} and windows.volume == (40, False)
 
 
 @pytest.mark.parametrize("bad", [-1, 101, 1000])
-def test_set_volume_range(monkeypatch, windows, bad):
-    monkeypatch.setattr(system, "_powershell", lambda *a, **k: pytest.fail("must not run"))
+def test_set_volume_range(windows, bad):
     assert not system.set_volume(bad).ok
+    assert windows.volume == (50, False)  # untouched
 
 
-def test_get_volume_and_mute(monkeypatch, windows):
-    monkeypatch.setattr(system, "_powershell", _ps("25,1"))
+def test_get_volume_and_mute(windows):
+    windows.volume = (25, True)
     assert system.get_volume().data == {"percent": 25, "muted": True}
     assert "(muted)" in system.set_mute(True).content
 
 
-def test_volume_failure_is_clean(monkeypatch, windows):
-    monkeypatch.setattr(system, "_powershell", _ps("", code=1))
-    assert not system.get_volume().ok
+def test_volume_failure_is_clean(windows):
+    windows.volume_error = OSError("no audio endpoint")
+    r = system.get_volume()
+    assert not r.ok and "no audio endpoint" in r.content
+    assert not system.set_volume(10).ok and not system.set_mute(True).ok
 
 
-def test_media_key(monkeypatch, windows):
-    pressed = []
-    monkeypatch.setattr(system, "_press_key", pressed.append)
+def test_volume_unsupported_message_is_passed_on(windows):
+    windows.volume_error = PlatformUnsupported("volume control needs wpctl: install wireplumber")
+    assert "install wireplumber" in system.get_volume().content
+
+
+def test_media_key(windows):
     assert system.media_key("next").ok and system.media_key("play_pause").ok
-    assert pressed == [0xB0, 0xB3]
+    assert windows.keys == ["next", "play_pause"]
 
 
-def test_lock_screen(monkeypatch, windows):
-    called = []
-    monkeypatch.setattr(system, "_lock_workstation", lambda: called.append(1))
-    assert system.lock_screen().ok and called == [1]
+def test_media_key_failure(windows):
+    windows.key_error = PlatformUnsupported("media keys need playerctl: install playerctl")
+    r = system.media_key("stop")
+    assert not r.ok and "install playerctl" in r.content
+
+
+def test_lock_screen(windows):
+    assert system.lock_screen().ok and windows.locked == 1
+
+
+def test_lock_screen_failure(windows):
+    windows.lock_error = OSError("no session")
+    assert not system.lock_screen().ok
+
+
+def test_list_running_apps_unsupported(windows):
+    windows.windows_error = PlatformUnsupported("listing windows is not supported in a Wayland session")
+    r = system.list_running_apps()
+    assert not r.ok and "Wayland" in r.content
+    r = system.close_app("notepad")
+    assert not r.ok and "Wayland" in r.content
+
+
+def test_list_running_apps(windows):
+    windows.window_rows = [("a.exe", "A one", 1, 1), ("a.exe", "A two", 1, 2), ("b.exe", "B", 2, 3)]
+    r = system.list_running_apps()
+    assert r.ok and "a.exe: A one | A two" in r.content and "b.exe: B" in r.content
 
 
 def test_clipboard(monkeypatch):
@@ -679,10 +712,17 @@ def test_clipboard(monkeypatch):
     store = {"v": "hello"}
     monkeypatch.setattr(pyperclip, "paste", lambda: store["v"])
     monkeypatch.setattr(pyperclip, "copy", lambda t: store.update(v=t))
+    monkeypatch.setattr(system.plat.current(), "clipboard_problem", lambda: None)
     assert system.get_clipboard().content == "hello"
     assert system.set_clipboard("new").ok and store["v"] == "new"
     store["v"] = ""
     assert "empty" in system.get_clipboard().content
+
+
+def test_clipboard_missing_helper_names_the_package(fake_platform):
+    fake_platform.clipboard_text = "the clipboard needs xclip or xsel (X11): install xclip"
+    for r in (system.get_clipboard(), system.set_clipboard("x")):
+        assert not r.ok and "install xclip" in r.content
 
 
 def test_open_url(monkeypatch):
@@ -692,6 +732,14 @@ def test_open_url(monkeypatch):
     for bad in ("file:///C:/x", "javascript:alert(1)", "example.com", "ftp://x.com"):
         assert not system.open_url(bad).ok
     assert opened == ["https://example.com/a"]
+
+
+def test_open_url_goes_through_the_platform(fake_platform):
+    assert system.open_url("https://example.com/b").ok
+    assert fake_platform.urls == ["https://example.com/b"]
+    fake_platform.open_error = PlatformUnsupported("opening files and links needs xdg-open: install xdg-utils")
+    r = system.open_url("https://example.com/c")
+    assert not r.ok and "install xdg-utils" in r.content
 
 
 # ---------------------------------------------------------------- real, read-only

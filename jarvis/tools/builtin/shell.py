@@ -1,9 +1,10 @@
-"""Shell tools: run a PowerShell command or a Python snippet.
+"""Shell tools: run a shell command (PowerShell on Windows, bash on Linux) or a Python snippet.
 
 ``run_command`` is SAFE only for a single read-only command on a conservative
-allowlist (see ``classify_command``); anything else asks the user first. When
-unsure the classifier says CONFIRM. The process tree is killed on timeout or
-cancellation. Python snippets always need approval.
+allowlist (``classify_powershell`` / ``classify_bash``, chosen by the platform's shell);
+anything else asks the user first. When unsure the classifier says CONFIRM. The process
+tree (on Linux, the whole process group) is killed on timeout or cancellation. Python
+snippets always need approval.
 """
 
 from __future__ import annotations
@@ -12,14 +13,12 @@ import asyncio
 import logging
 import os
 import shlex
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-import psutil
-
+from jarvis import platform as plat
 from jarvis.tools.base import Risk, ToolContext, ToolResult, tool
 from jarvis.tools.builtin.files import resolve_path
 
@@ -86,7 +85,7 @@ def _simple_command_ok(tokens: list[str]) -> bool:
     return head in _SIMPLE_READERS
 
 
-def classify_command(command: str) -> Risk:
+def classify_powershell(command: str) -> Risk:
     """SAFE only for a single simple read-only command (optionally piped through read-only
     filters); CONFIRM for everything else, including anything the parser is unsure about."""
     text = (command or "").strip()
@@ -107,6 +106,84 @@ def classify_command(command: str) -> Risk:
     return Risk.SAFE
 
 
+# ---- bash. Single simple commands from an allowlist, optionally piped through other
+# allowlisted commands. Anything that chains, redirects, expands, substitutes, elevates or
+# runs another program is CONFIRM. The character check looks at the raw text, so a banned
+# character inside quotes also asks: being conservative costs only a prompt.
+_BASH_FORBIDDEN_CHARS = set(";&<>`$(){}\\\n\r")
+_BASH_FORBIDDEN_WORDS = {
+    "sudo", "su", "doas", "pkexec", "eval", "exec", "xargs", "sh", "bash", "zsh", "dash", "fish",
+    "source", "nohup", "setsid", "env", "command", "builtin", "time", "watch", "timeout", "nice",
+}
+_BASH_READERS = {
+    "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "pwd", "whoami", "hostname", "date",
+    "uname", "df", "du", "free", "ps", "uptime", "which", "env", "printenv", "echo",
+}
+_FIND_BAD = {
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
+}
+_RG_BAD_PREFIXES = ("--pre", "--hostname-bin")
+_TAIL_FOLLOW = {"-f", "-F", "--follow"}
+
+
+def _bash_simple_ok(tokens: list[str]) -> bool:
+    head, args = tokens[0], tokens[1:]
+    if head in _BASH_FORBIDDEN_WORDS and head != "env":
+        return False
+    if head == "git":
+        if not args:
+            return False
+        sub = args[0]
+        if any(part in a.lower() for a in args for part in _GIT_BAD_ARG_PARTS):
+            return False
+        if sub in _GIT_READ:
+            return True
+        return sub == "branch" and all(a in _GIT_BRANCH_FLAGS for a in args[1:])
+    if head in ("python", "python3"):
+        if args in (["--version"], ["-V"]):
+            return True
+        return len(args) >= 3 and args[:2] == ["-m", "pip"] and args[2] in _PIP_READ
+    if head in ("pip", "pip3"):
+        return bool(args) and args[0] in _PIP_READ
+    if head not in _BASH_READERS:
+        return False
+    if head == "env":
+        return not args  # `env cmd` would run cmd
+    if head == "find":
+        return not any(a in _FIND_BAD for a in args)
+    if head == "rg":
+        return not any(a.startswith(_RG_BAD_PREFIXES) for a in args)
+    if head == "tail":
+        return not any(a in _TAIL_FOLLOW or (a.startswith("-") and not a.startswith("--") and "f" in a.lower() and a[1:].isalpha()) for a in args)
+    if head == "hostname":
+        return all(a.startswith("-") for a in args)  # a bare argument would set the name
+    if head == "date":
+        return all((a.startswith("+") or a.startswith("-")) and not a.startswith(("-s", "--set")) for a in args)
+    return True
+
+
+def classify_bash(command: str) -> Risk:
+    """SAFE only for a single simple read-only command (optionally piped into other
+    allowlisted commands); CONFIRM for everything else, including anything unclear."""
+    text = (command or "").strip()
+    if not text or len(text) > 400 or any(c in _BASH_FORBIDDEN_CHARS for c in text):
+        return Risk.CONFIRM
+    for segment in text.split("|"):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return Risk.CONFIRM
+        if not tokens or not _bash_simple_ok(tokens):
+            return Risk.CONFIRM
+    return Risk.SAFE
+
+
+def classify_command(command: str, shell: str | None = None) -> Risk:
+    """Risk of a command for ``shell`` ('powershell' or 'bash'; default: this machine's)."""
+    kind = shell or plat.current().shell_kind
+    return classify_bash(command) if kind == "bash" else classify_powershell(command)
+
+
 def _command_risk(args: dict[str, Any]) -> Risk:
     return classify_command(str(args.get("command", "")))
 
@@ -115,22 +192,12 @@ def _command_describe(args: dict[str, Any]) -> str:
     cmd = str(args.get("command", ""))
     shown = cmd if len(cmd) <= 300 else cmd[:300] + "..."
     where = f" in {args['cwd']}" if args.get("cwd") else ""
-    return f"Run PowerShell command{where}: {shown}"
+    return f"Run {plat.current().shell_name} command{where}: {shown}"
 
 
 # ----------------------------------------------------------------- execution
 def _kill_tree(pid: int) -> None:
-    try:
-        parent = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    procs = parent.children(recursive=True) + [parent]
-    for p in procs:
-        try:
-            p.kill()
-        except psutil.NoSuchProcess:
-            pass
-    psutil.wait_procs(procs, timeout=3)
+    plat.current().kill_tree(pid)
 
 
 def _tail(text: str) -> str:
@@ -143,7 +210,6 @@ def _tail(text: str) -> str:
 async def _run_process(
     argv: list[str], cwd: str | None, timeout: int, ctx: ToolContext, env: dict[str, str] | None = None
 ) -> ToolResult:
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -152,7 +218,7 @@ async def _run_process(
             stdin=asyncio.subprocess.DEVNULL,
             cwd=cwd,
             env=env,
-            creationflags=flags,
+            **plat.current().subprocess_kwargs(),
         )
     except OSError as exc:
         return ToolResult.fail(f"could not start {argv[0]}: {exc}")
@@ -191,20 +257,21 @@ def _clamp(seconds: int) -> int:
     return max(1, min(int(seconds), MAX_TIMEOUT))
 
 
-@tool(group=GROUP, risk=_command_risk, describe=_command_describe, timeout=SPEC_TIMEOUT)
-async def run_command(
-    command: str, ctx: ToolContext, cwd: str | None = None, timeout_seconds: int = 60
-) -> ToolResult:
-    """Run a PowerShell command on this Windows PC and return its output and exit code. Use for
-    anything the dedicated tools do not cover (git, pip, system info, scripts). Simple read-only
-    commands run immediately; everything else asks the user first. A non-zero exit code is
-    reported as a failure with the output.
+_RUN_COMMAND_DOC = """Run a {shell} command on this {os} machine and return its output and exit code. Use
+    for anything the dedicated tools do not cover (git, pip, system info, scripts). Simple
+    read-only commands run immediately; everything else asks the user first. A non-zero exit
+    code is reported as a failure with the output.
 
     Args:
-        command: PowerShell command line to run.
+        command: {shell} command line to run.
         cwd: Working folder (default: the home folder).
         timeout_seconds: Kill the command after this many seconds (1-600).
     """
+
+
+async def run_command(
+    command: str, ctx: ToolContext, cwd: str | None = None, timeout_seconds: int = 60
+) -> ToolResult:
     if not command.strip():
         return ToolResult.fail("command is empty")
     try:
@@ -213,10 +280,16 @@ async def run_command(
         return ToolResult.fail(str(exc))
     if not directory.is_dir():
         return ToolResult.fail(f"working folder does not exist: {directory}", "Check the path with list_directory.")
-    # UTF-8 output and no progress bars (they pollute captured output).
-    script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; " + command
-    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+    argv = plat.current().shell_argv(command)
     return await _run_process(argv, str(directory), _clamp(timeout_seconds), ctx)
+
+
+# The model reads the docstring, so it names the shell this machine really uses; the
+# platform is known at import time, before the decorator builds the tool spec.
+run_command.__doc__ = _RUN_COMMAND_DOC.format(
+    shell=plat.current().shell_name, os={"windows": "Windows", "linux": "Linux"}.get(plat.current().name, "this")
+)
+run_command = tool(group=GROUP, risk=_command_risk, describe=_command_describe, timeout=SPEC_TIMEOUT)(run_command)
 
 
 def _python_describe(args: dict[str, Any]) -> str:

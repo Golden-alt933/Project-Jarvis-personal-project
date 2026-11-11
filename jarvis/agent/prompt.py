@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jarvis import platform as plat
 from jarvis.tools.paths import known_folder
 
 if TYPE_CHECKING:
@@ -27,9 +28,11 @@ def _machine_section() -> str:
     except Exception:
         user = os.environ.get("USERNAME", "unknown")
     folders = ", ".join(f"{n}: {known_folder(n)}" for n in _PROMPT_FOLDERS)
+    backend = plat.current()
     return (
         f"The machine: {platform.system()} {platform.release()} ({platform.version()}), "
-        f"Windows account '{user}', home directory {Path.home()}. {folders}."
+        f"{backend.describe()}, user account '{user}', home directory {Path.home()}. {folders}. "
+        f"Commands run in {backend.shell_name}."
     )
 
 
@@ -43,6 +46,9 @@ def _time_section(now: datetime | None) -> str:
     )
 
 
+_OS_NAMES = {"windows": "Windows", "linux": "Linux"}
+
+
 def _identity(settings: "Settings") -> str:
     address = (
         f"Address the user as {settings.user_name}."
@@ -50,7 +56,8 @@ def _identity(settings: "Settings") -> str:
         else 'You may call the user "sir", sparingly.'
     )
     return (
-        "You are Jarvis, a personal AI running on the user's Windows PC, in the spirit of the "
+        f"You are Jarvis, a personal AI running on the user's {_OS_NAMES.get(plat.current().name, 'desktop')} "
+        "computer, in the spirit of the "
         "film character: calm, capable and concise, with a dry, understated wit that never "
         f"gets in the way of the work. {address}\n\n"
         "You act rather than describe what you would do. When a question concerns this "

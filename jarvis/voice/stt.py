@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 import numpy as np
 
+from jarvis import platform as plat
 from jarvis.voice.types import SAMPLE_RATE, Transcript
 
 if TYPE_CHECKING:
@@ -61,19 +62,12 @@ MAX_COMPRESSION = 2.4  # repetition loops compress too well
 
 
 def _add_nvidia_dll_dirs() -> None:
-    """Make the pip-installed cuBLAS/cuDNN (nvidia-*-cu12) DLLs findable by ctranslate2."""
-    if sys.platform != "win32":
-        return
-    for base in sys.path:
-        root = Path(base) / "nvidia"
-        if not root.is_dir():
-            continue
-        for bin_dir in root.glob("*/bin"):
-            try:
-                os.add_dll_directory(str(bin_dir))
-                os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
-            except OSError:
-                pass
+    """Make the pip-installed cuBLAS/cuDNN (nvidia-*-cu12) libraries findable by ctranslate2.
+    The OS-specific loading lives in the platform backend."""
+    try:
+        plat.current().prepare_gpu_libs()
+    except Exception:  # the CPU path works without it
+        log.debug("could not prepare GPU libraries", exc_info=True)
 
 
 _add_nvidia_dll_dirs()

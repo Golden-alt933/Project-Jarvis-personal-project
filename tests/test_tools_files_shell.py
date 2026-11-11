@@ -71,11 +71,27 @@ def test_all_tools_registered(registry: ToolRegistry):
 def test_resolve_path_forms(fake_home: Path, monkeypatch):
     assert files.resolve_path("notes.txt") == fake_home / "notes.txt"
     assert files.resolve_path("~/a/b.txt") == fake_home / "a" / "b.txt"
+    monkeypatch.setenv("MYDIR", str(fake_home / "x"))
+    assert files.resolve_path("$MYDIR/f.txt") == fake_home / "x" / "f.txt"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="backslash separators and %VAR% expansion are Windows path syntax")
+def test_resolve_path_windows_forms(fake_home: Path, monkeypatch):
     assert files.resolve_path("~/a/b.txt") == files.resolve_path(r"~\a\b.txt")
     monkeypatch.setenv("MYDIR", str(fake_home / "x"))
     assert files.resolve_path("%MYDIR%/f.txt") == fake_home / "x" / "f.txt"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="CON/NUL/COMn are device names only on Windows")
+def test_resolve_path_rejects_windows_device_names():
     with pytest.raises(ValueError):
         files.resolve_path("NUL")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="on Windows these names are devices")
+def test_resolve_path_allows_device_looking_names_off_windows(fake_home: Path):
+    assert files.resolve_path("NUL") == fake_home / "NUL"
+    assert files.resolve_path("con.txt") == fake_home / "con.txt"
 
 
 async def test_not_found_hint_lists_similar(registry, tmp_path):
@@ -376,12 +392,16 @@ async def test_delete_path_missing(registry, tmp_path, trash):
 
 
 async def test_delete_refusals(registry, fake_home, trash, monkeypatch):
-    windir = fake_home.parent / "FakeWindows"
-    (windir / "System32").mkdir(parents=True)
-    monkeypatch.setenv("SystemRoot", str(windir))
-    monkeypatch.setenv("windir", str(windir))
     drive_root = Path(os.path.abspath(fake_home)).anchor
-    targets = [drive_root, str(fake_home), str(fake_home.parent), str(windir), str(windir / "System32")]
+    targets = [drive_root, str(fake_home), str(fake_home.parent)]
+    if sys.platform == "win32":
+        windir = fake_home.parent / "FakeWindows"
+        (windir / "System32").mkdir(parents=True)
+        monkeypatch.setenv("SystemRoot", str(windir))
+        monkeypatch.setenv("windir", str(windir))
+        targets += [str(windir), str(windir / "System32")]
+    else:
+        targets += [p for p in ("/usr", "/usr/lib", "/etc", "/bin") if os.path.exists(p)]
     for t in targets:
         r = await call(registry, "delete_path", path=t)
         assert not r.ok and "refusing" in r.content, t
@@ -394,9 +414,8 @@ async def test_move_refuses_protected_source(registry, fake_home):
 
 
 # --------------------------------------------------------------------- open
-async def test_open_path(registry, tmp_path, monkeypatch):
-    opened: list[str] = []
-    monkeypatch.setattr(os, "startfile", lambda p: opened.append(p), raising=False)
+async def test_open_path(registry, tmp_path, fake_platform):
+    opened = fake_platform.paths
     f = tmp_path / "doc.txt"
     f.write_text("x")
     ctx, asker = make_ctx(False)
@@ -483,12 +502,12 @@ UNSAFE_COMMANDS = [
 
 @pytest.mark.parametrize("cmd", SAFE_COMMANDS)
 def test_classifier_safe(cmd):
-    assert shell.classify_command(cmd) is Risk.SAFE, cmd
+    assert shell.classify_powershell(cmd) is Risk.SAFE, cmd
 
 
 @pytest.mark.parametrize("cmd", UNSAFE_COMMANDS)
 def test_classifier_unsafe(cmd):
-    assert shell.classify_command(cmd) is Risk.CONFIRM, cmd
+    assert shell.classify_powershell(cmd) is Risk.CONFIRM, cmd
 
 
 def test_classifier_table_size():

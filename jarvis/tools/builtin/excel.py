@@ -808,7 +808,7 @@ def _recalc_reason(recalc: excel_calc.Recalc) -> str:
     return {
         "unavailable": f"{recalc.detail}, so the workbook was not recalculated",
         "locked": f"{recalc.detail}, so it was not recalculated (close it and write again to store values)",
-    }.get(recalc.status, f"Excel recalculation did not complete ({recalc.detail}); the file is saved as written")
+    }.get(recalc.status, f"{recalc.engine} recalculation did not complete ({recalc.detail}); the file is saved as written")
 
 
 def _formula_report(
@@ -841,7 +841,7 @@ def _formula_report(
             book.close()
     listing = ", ".join(values) + (f" and {len(cells) - len(shown)} more" if len(cells) > len(shown) else "")
     if recalc.ok:
-        head = f"Excel recalculated the workbook ({n_formulas} formula cell(s)); stored values are now current."
+        head = f"{recalc.engine} recalculated the workbook ({n_formulas} formula cell(s)); stored values are now current."
         return head + (f" Calculated: {listing}." if listing else "")
     head = f"{_recalc_reason(recalc)}."
     tail = (

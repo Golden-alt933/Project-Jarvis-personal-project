@@ -9,8 +9,9 @@ from __future__ import annotations
 import base64
 import io
 import logging
-import sys
 from typing import TYPE_CHECKING, Literal
+
+from jarvis import platform as plat
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -59,37 +60,9 @@ def downscale(image: "Image", max_edge: int) -> "Image":
     return image
 
 
-# -- win32 -------------------------------------------------------------------
-_dpi_set = False
-
-
-def _ensure_dpi_aware() -> None:
-    """Without this, cursor and monitor coordinates disagree at non-100% scaling."""
-    global _dpi_set
-    if _dpi_set or sys.platform != "win32":
-        return
-    _dpi_set = True
-    try:
-        import ctypes
-
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
-    except Exception:  # already set (e.g. by mss) or unavailable
-        log.debug("could not set DPI awareness", exc_info=True)
-
-
+# -- platform ----------------------------------------------------------------
 def _cursor_position() -> tuple[int, int] | None:
-    if sys.platform != "win32":
-        return None
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        point = wintypes.POINT()
-        if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
-            return int(point.x), int(point.y)
-    except Exception:
-        log.debug("GetCursorPos failed", exc_info=True)
-    return None
+    return plat.current().cursor_position()
 
 
 def pick_monitor(monitors: list[dict], spec: MonitorSpec, cursor: tuple[int, int] | None) -> dict:
@@ -112,19 +85,8 @@ def pick_monitor(monitors: list[dict], spec: MonitorSpec, cursor: tuple[int, int
 
 def capture_window_title() -> str:
     """Title of the foreground window, or "" if unknown."""
-    if sys.platform != "win32":
-        return ""
     try:
-        import ctypes
-
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd:
-            return ""
-        length = user32.GetWindowTextLengthW(hwnd)
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        return buffer.value.strip()
+        return plat.current().foreground_window_title()
     except Exception:
         log.debug("window title unavailable", exc_info=True)
         return ""
@@ -140,17 +102,23 @@ def capture_screen(monitor: MonitorSpec = "active", max_edge: int | None = None)
     except ImportError as exc:
         raise CaptureError(f"screen capture needs mss and Pillow ({exc.name})") from exc
 
-    _ensure_dpi_aware()
-    factory = getattr(mss, "MSS", None) or mss.mss
+    backend = plat.current()
+    backend.prepare_capture()
     try:
-        with factory() as sct:
-            chosen = pick_monitor(list(sct.monitors), monitor, _cursor_position())
-            raw = sct.grab(chosen)
-            image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-    except CaptureError:
-        raise
-    except Exception as exc:
-        raise CaptureError(f"could not read the screen: {exc}") from exc
+        image = backend.screen_grab()  # an OS tool (Wayland), or None to read the screen with mss
+    except OSError as exc:
+        raise CaptureError(str(exc)) from exc
+    if image is None:
+        factory = getattr(mss, "MSS", None) or mss.mss
+        try:
+            with factory() as sct:
+                chosen = pick_monitor(list(sct.monitors), monitor, _cursor_position())
+                raw = sct.grab(chosen)
+                image = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        except CaptureError:
+            raise
+        except Exception as exc:
+            raise CaptureError(f"could not read the screen: {exc}") from exc
     return downscale(image, DEFAULT_MAX_EDGE if max_edge is None else max_edge)
 
 

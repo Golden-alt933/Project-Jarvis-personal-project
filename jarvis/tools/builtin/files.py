@@ -24,6 +24,7 @@ from typing import Any, Iterator, Literal
 
 from send2trash import send2trash
 
+from jarvis import platform as plat
 from jarvis.tools.base import Risk, ToolResult, tool
 from jarvis.tools.paths import RESERVED_NAMES, bad_path as _bad_path  # noqa: F401  (re-exported)
 from jarvis.tools.paths import decode_text as _decode
@@ -106,13 +107,8 @@ def _protected_reason(path: Path) -> str | None:
         return "it is your home folder"
     if real == _norm(_home().parent):
         return "it is the Users folder"
-    for var in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"):
-        base = os.environ.get(var)
-        if not base:
-            continue
-        b = _norm(base)
-        if real == b or real.startswith(b + os.sep):
-            return f"it is inside the system folder {base}"
+    if reason := plat.current().protected_path_reason(real):
+        return reason
     return None
 
 
@@ -671,11 +667,11 @@ def copy_path(source: str, destination: str) -> ToolResult:
 @tool(
     group=GROUP,
     risk=Risk.CONFIRM,
-    describe=lambda a: f"Move {_arg_path(a, 'path')} to the Recycle Bin",
+    describe=lambda a: f"Move {_arg_path(a, 'path')} to the {plat.current().trash_name}",
 )
 def delete_path(path: str) -> ToolResult:
-    """Delete a file or folder by sending it to the Recycle Bin (recoverable). Needs user
-    approval. Refuses drive roots, the home folder and Windows/Program Files folders.
+    """Delete a file or folder by sending it to the Recycle Bin or Trash (recoverable). Needs user
+    approval. Refuses drive roots, the home folder and operating-system folders.
 
     Args:
         path: File or folder to delete.
@@ -692,7 +688,7 @@ def delete_path(path: str) -> ToolResult:
         send2trash(str(target))
     except Exception as exc:  # send2trash raises OSError and platform-specific errors
         return ToolResult.fail(f"cannot delete {target}: {exc}")
-    return ToolResult.success(f"Sent {target} to the Recycle Bin (restorable from there).")
+    return ToolResult.success(f"Sent {target} to the {plat.current().trash_name} (restorable from there).")
 
 
 @tool(group=GROUP)
@@ -718,7 +714,7 @@ def create_folder(path: str) -> ToolResult:
 
 def _open_risk(args: dict[str, Any]) -> Risk:
     try:
-        return Risk.CONFIRM if resolve_path(args["path"]).suffix.lower() in EXECUTABLE_SUFFIXES else Risk.SAFE
+        return Risk.CONFIRM if resolve_path(args["path"]).suffix.lower() in (EXECUTABLE_SUFFIXES | plat.current().executable_suffixes) else Risk.SAFE
     except (ValueError, KeyError):
         return Risk.CONFIRM
 
@@ -742,7 +738,7 @@ def open_path(path: str) -> ToolResult:
     if not target.exists():
         return _missing(target)
     try:
-        os.startfile(str(target))  # type: ignore[attr-defined]  # Windows only
+        plat.current().open_path(str(target))
     except OSError as exc:
         return ToolResult.fail(f"cannot open {target}: {exc.strerror or exc}")
     return ToolResult.success(f"Opened {target}.")

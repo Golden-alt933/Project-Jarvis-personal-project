@@ -1,8 +1,16 @@
-"""Recalculate a saved workbook with real Excel, in a private hidden instance.
+"""Recalculate a saved workbook with a real spreadsheet engine.
 
 openpyxl writes formulas but never their values, so after Jarvis saves a workbook every
-formula has no cached result until Excel opens and saves it. When Excel is installed this
-module does exactly that, safely:
+formula has no cached result until a spreadsheet program opens and saves it. Two engines:
+
+- Excel (Windows, COM), in a private hidden instance, described below;
+- LibreOffice (any OS where ``soffice`` is installed; the Linux path): a headless
+  convert-to-xlsx of a temp copy in a private profile (LibreOffice calculates formulas
+  that have no cached value on load), swapped in atomically under the same rules. A
+  LibreOffice re-save can change styling or drop features openpyxl never touched, so
+  Excel is preferred when both exist.
+
+The Excel path, safely:
 
 - a NEW Excel process is started (``DispatchEx``); the user's own Excel is never attached to,
   changed or closed;
@@ -18,7 +26,8 @@ import functools
 import gc
 import logging
 import os
-import sys
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -26,6 +35,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from jarvis import platform as plat
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +51,7 @@ class Recalc:
 
     status: str
     detail: str = ""
+    engine: str = "Excel"
 
     @property
     def ok(self) -> bool:
@@ -49,15 +61,12 @@ class Recalc:
 @functools.lru_cache(maxsize=1)
 def excel_installed() -> bool:
     """True if the Excel.Application COM class is registered (detected once)."""
-    if sys.platform != "win32":
-        return False
-    try:
-        import winreg
+    return plat.current().has_excel_com()
 
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"Excel.Application\CLSID"):
-            return True
-    except OSError:
-        return False
+
+def find_soffice() -> str | None:
+    """Path of LibreOffice's command-line launcher, if installed."""
+    return shutil.which("soffice") or shutil.which("libreoffice")
 
 
 def _com_modules() -> tuple[Any, Any, Any]:
@@ -187,17 +196,84 @@ def _valid_xlsx(path: Path) -> bool:
         return False
 
 
+# ------------------------------------------------------------------ LibreOffice
+def _run_soffice(argv: list[str], timeout: float) -> tuple[int, str]:
+    """Run LibreOffice in its own process group; (exit code, output). A seam for tests."""
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        **plat.current().subprocess_kwargs(),
+    )
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        plat.current().kill_tree(proc.pid)
+        proc.communicate()
+        raise
+    return proc.returncode, out or ""
+
+
+def _recalculate_libreoffice(path: Path, soffice: str, timeout: float) -> Recalc:
+    engine = "LibreOffice"
+    if (path.parent / f".~lock.{path.name}#").exists():
+        return Recalc("locked", f"{path.name} is open in LibreOffice", engine)
+    if is_locked(path):
+        return Recalc("locked", f"{path.name} is open in another program", engine)
+    staged: Path | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="jarvis-lo-") as tmp:
+            work = Path(tmp)
+            (work / "in").mkdir()
+            (work / "out").mkdir()
+            source = work / "in" / path.name
+            shutil.copyfile(path, source)
+            profile = (work / "profile").as_uri()
+            argv = [
+                soffice, f"-env:UserInstallation={profile}", "--headless", "--norestore", "--nolockcheck",
+                "--convert-to", "xlsx:Calc MS Excel 2007 XML", "--outdir", str(work / "out"), str(source),
+            ]
+            try:
+                code, output = _run_soffice(argv, timeout)
+            except subprocess.TimeoutExpired:
+                return Recalc("timeout", f"LibreOffice did not finish within {timeout:.0f}s and was stopped", engine)
+            produced = work / "out" / path.name
+            if code != 0 or not _valid_xlsx(produced):
+                return Recalc("failed", f"LibreOffice did not produce a valid file ({output.strip()[:120] or code})", engine)
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.calc.", suffix=path.suffix)
+            os.close(fd)
+            staged = Path(name)
+            shutil.copyfile(produced, staged)
+        try:
+            os.replace(staged, path)
+        except PermissionError:
+            return Recalc("locked", f"{path.name} was opened elsewhere during recalculation", engine)
+        staged = None
+        return Recalc("ok", "", engine)
+    except OSError as exc:
+        return Recalc("failed", f"{type(exc).__name__}: {exc}", engine)
+    finally:
+        if staged is not None:
+            _discard(staged)
+
+
 # ------------------------------------------------------------------ public API
 def recalculate(path: Path, timeout: float = RECALC_TIMEOUT) -> Recalc:
-    """Recalculate ``path`` in place with a private hidden Excel and store the results.
+    """Recalculate ``path`` in place and store the results: with a private hidden Excel
+    when installed, else with headless LibreOffice when installed.
 
-    Never raises. Returns status ``unavailable`` (no Excel), ``locked`` (the user has the file
-    open), ``timeout`` or ``failed`` without having touched the original file.
+    Never raises. Returns status ``unavailable`` (no engine), ``locked`` (the user has the
+    file open), ``timeout`` or ``failed`` without having touched the original file.
     """
-    if not excel_installed():
-        return Recalc("unavailable", "Excel is not installed")
+    if excel_installed():
+        return _recalculate_excel(path, timeout)
+    soffice = find_soffice()
+    if soffice:
+        return _recalculate_libreoffice(path, soffice, timeout)
+    return Recalc("unavailable", "Excel is not installed and neither is LibreOffice (soffice)")
+
+
+def _recalculate_excel(path: Path, timeout: float) -> Recalc:
     try:
-        import pythoncom  # noqa: F401  (confirms pywin32 is usable before any copying)
+        _com_modules()  # confirms pywin32 is usable before any copying
     except ImportError:
         return Recalc("unavailable", "pywin32 is not installed")
     if is_locked(path):

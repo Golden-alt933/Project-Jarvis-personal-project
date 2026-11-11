@@ -9,71 +9,29 @@ import logging
 import os
 import shutil
 import stat
-import sys
 from pathlib import Path
 
+from jarvis import platform as plat
 from jarvis.tools.base import ToolResult
 
 log = logging.getLogger(__name__)
 
-# Windows device names: os.path.exists("NUL") is True and nobody means that.
+# Windows device names: os.path.exists("NUL") is True there and nobody means that.
 RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{i}" for i in range(1, 10)}
     | {f"LPT{i}" for i in range(1, 10)}
 )
 
-KNOWN_FOLDERS = {
-    "Desktop": "B4BFCC3A-DB2C-424C-B029-7FE99A87C641",
-    "Documents": "FDD39AD0-238F-46AF-ADB4-6C85480369C7",
-    "Downloads": "374DE290-123F-4565-9164-39C4925E467B",
-    "Pictures": "33E28130-4E1E-4676-835A-98395C3BC3BB",
-    "Music": "4BD8D571-6D19-48D3-BE97-422220080E43",
-    "Videos": "18989B1D-99B5-42AC-8B2D-CC9CF2A3C0D2",
-}
-
-
 def known_folder(name: str) -> Path:
-    """Resolve Desktop, Documents, Downloads, Pictures, Music or Videos.
-
-    On Windows these are often redirected (OneDrive), so the shell is asked instead of
-    assuming ``~/Desktop``. Falls back to ``~/<name>`` when the lookup is unavailable.
-    """
-    fallback = Path.home() / name
-    guid_text = KNOWN_FOLDERS.get(name)
-    if guid_text is None or sys.platform != "win32":
-        return fallback
+    """Resolve Desktop, Documents, Downloads, Pictures, Music or Videos through the platform
+    backend (the Windows shell, which follows OneDrive redirection, or ``xdg-user-dir`` on
+    Linux). Falls back to ``~/<name>`` when the lookup is unavailable."""
     try:
-        import ctypes
-        import uuid
-        from ctypes import wintypes
-
-        class _GUID(ctypes.Structure):
-            _fields_ = [
-                ("Data1", wintypes.DWORD),
-                ("Data2", wintypes.WORD),
-                ("Data3", wintypes.WORD),
-                ("Data4", ctypes.c_ubyte * 8),
-            ]
-
-        raw = uuid.UUID(guid_text)
-        guid = _GUID(
-            raw.time_low,
-            raw.time_mid,
-            raw.time_hi_version,
-            (ctypes.c_ubyte * 8)(*raw.bytes[8:]),
-        )
-        out = ctypes.c_wchar_p()
-        rc = ctypes.windll.shell32.SHGetKnownFolderPath(  # type: ignore[attr-defined]
-            ctypes.byref(guid), 0, None, ctypes.byref(out)
-        )
-        if rc == 0 and out.value:
-            path = Path(out.value)
-            ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
-            return path
+        return plat.current().known_folder(name)
     except Exception:  # best effort; the fallback is right for most machines
         log.debug("known folder lookup failed for %s", name, exc_info=True)
-    return fallback
+        return Path.home() / name
 
 
 def home() -> Path:
@@ -91,7 +49,7 @@ def resolve_path(raw: str) -> Path:
     expanded = os.path.expanduser(os.path.expandvars(text))
     path = Path(expanded)
     # Checked before abspath(), which rewrites device names into odd device paths.
-    if path.name.split(".")[0].upper() in RESERVED_NAMES:
+    if plat.current().reserved_device_names and path.name.split(".")[0].upper() in RESERVED_NAMES:
         raise ValueError(f"'{raw}' is a reserved Windows device name, not a file")
     if not path.is_absolute() and not path.drive:
         path = home() / path

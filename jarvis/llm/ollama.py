@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from jarvis import platform as plat
 from jarvis.llm.openai_compat import ThinkStripper, new_call_id
 from jarvis.llm.types import (
     LLMBadRequest,
@@ -67,29 +68,22 @@ def find_ollama_exe() -> str | None:
     found = shutil.which("ollama")
     if found:
         return found
-    local = os.environ.get("LOCALAPPDATA", "")
-    candidate = Path(local) / "Programs" / "Ollama" / "ollama.exe" if local else None
-    return str(candidate) if candidate and candidate.is_file() else None
+    for candidate in plat.current().ollama_extra_paths():
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def launch_ollama_serve(exe: str) -> None:
-    """Start `ollama serve` detached, without a console window. Never killed by us."""
-    kwargs: dict[str, Any] = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-            | subprocess.CREATE_NO_WINDOW
-        )
-    else:
-        kwargs["start_new_session"] = True
+    """Start `ollama serve` detached (no console window on Windows, its own session
+    elsewhere). Never killed by us."""
     subprocess.Popen(
         [exe, "serve"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
-        **kwargs,
+        **plat.current().detached_popen_kwargs(),
     )
 
 
@@ -123,7 +117,8 @@ async def ensure_ollama_running(base_url: str) -> bool:
         if first:
             exe = find_ollama_exe()
             if exe is None:
-                _autostart.failure = "ollama.exe was not found on PATH or in %LOCALAPPDATA%\\Programs\\Ollama"
+                places = ", ".join(str(c.parent) for c in plat.current().ollama_extra_paths())
+                _autostart.failure = "ollama was not found on PATH" + (f" or in {places}" if places else "")
             else:
                 try:
                     launch_ollama_serve(exe)
