@@ -114,12 +114,11 @@ def module_present(name: str) -> bool:
 
 def probe_audio() -> tuple[int, int] | str:
     """(input devices, output devices), or an error text."""
-    try:
-        import sounddevice as sd
-    except ImportError:
-        return "sounddevice is not installed"
-    except OSError as exc:  # PortAudio library missing
-        return f"PortAudio library not found ({exc})"
+    from jarvis.voice import audio
+
+    sd = audio.sd
+    if sd is None:  # not installed, PortAudio missing, or no sound server: audio.py caught it
+        return audio.sounddevice_problem()
     try:
         devices = list(sd.query_devices())
     except Exception as exc:

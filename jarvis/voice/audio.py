@@ -22,10 +22,24 @@ import numpy as np
 
 from jarvis.voice.types import FRAME_SAMPLES, SAMPLE_RATE
 
+_SD_ERROR: Exception | None = None
 try:  # the voice extra may be missing; NullOutput/ArrayInput must still import
     import sounddevice as sd
-except Exception:  # pragma: no cover - depends on the environment
+except Exception as _exc:  # pragma: no cover - depends on the environment
+    # ImportError: extra not installed. OSError: the PortAudio library is missing.
+    # PortAudioError: no sound server is reachable (typical on a headless Linux machine).
     sd = None  # type: ignore[assignment]
+    _SD_ERROR = _exc
+
+
+def sounddevice_problem() -> str:
+    """Why audio is unavailable, in words that say what to do."""
+    if isinstance(_SD_ERROR, ImportError):
+        return "sounddevice is not installed (install the 'voice' extra)"
+    return (
+        f"the audio system could not start ({type(_SD_ERROR).__name__}: {_SD_ERROR}); on Linux install "
+        "libportaudio2 and make sure a sound server (PipeWire or PulseAudio) is running"
+    )
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +162,7 @@ def resolve_device(spec: str | int | None, *, output: bool = False) -> int | Non
 def list_devices() -> str:
     """A readable device table for the `--devices` flag."""
     if sd is None:
-        return "sounddevice is not installed (install the 'voice' extra)."
+        return sounddevice_problem() + "."
     try:
         devices = sd.query_devices()
         apis = sd.query_hostapis()
@@ -253,7 +267,7 @@ class MicInput:
 
     def _try_open(self) -> bool:
         if sd is None:
-            log.error("sounddevice is not installed; microphone unavailable.")
+            log.error("microphone unavailable: %s", sounddevice_problem())
             return False
         try:
             device = resolve_device(self.device)
@@ -388,7 +402,7 @@ class SpeakerOutput:
 
     def _open(self) -> None:
         if sd is None:
-            log.error("sounddevice is not installed; speaker unavailable.")
+            log.error("speaker unavailable: %s", sounddevice_problem())
             return
         try:
             device = resolve_device(self.device, output=True)

@@ -50,6 +50,7 @@ def cmds(monkeypatch):
     c = Cmds()
     monkeypatch.setattr(lx.shutil, "which", c.which)
     monkeypatch.setattr(lx, "run_quiet", c.run)
+    monkeypatch.setattr(lx.ctypes.util, "find_library", lambda name: None)  # real one spawns a subprocess
 
     class FakePopen:
         def __init__(self, argv, **kwargs):

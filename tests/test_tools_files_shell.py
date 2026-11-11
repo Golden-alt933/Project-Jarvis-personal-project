@@ -380,10 +380,13 @@ async def test_delete_path_confirm_flow(registry, tmp_path, trash):
     ctx, asker = make_ctx(False)
     r = await call(registry, "delete_path", ctx, path=str(f))
     assert not r.ok and trash == []
-    assert asker.prompts == [f"Move {f} to the Recycle Bin"]
+    from jarvis import platform as plat
+
+    bin_name = plat.current().trash_name  # "Recycle Bin" on Windows, "Trash" elsewhere
+    assert asker.prompts == [f"Move {f} to the {bin_name}"]
     ctx, _ = make_ctx(True)
     r = await call(registry, "delete_path", ctx, path=str(f))
-    assert r.ok and trash == [str(f)] and "Recycle Bin" in r.content
+    assert r.ok and trash == [str(f)] and bin_name in r.content
 
 
 async def test_delete_path_missing(registry, tmp_path, trash):

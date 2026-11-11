@@ -558,12 +558,14 @@ def test_probe_ollama(monkeypatch, tmp_path):
 
 
 def test_probe_audio_counts_devices(monkeypatch):
+    from jarvis.voice import audio
+
     fake = types.SimpleNamespace(query_devices=lambda: [
         {"max_input_channels": 2, "max_output_channels": 0},
         {"max_input_channels": 0, "max_output_channels": 2},
         {"max_input_channels": 1, "max_output_channels": 1},
     ])
-    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    monkeypatch.setattr(audio, "sd", fake)
     assert doctor.probe_audio() == (2, 2)
 
     def boom():
@@ -573,24 +575,25 @@ def test_probe_audio_counts_devices(monkeypatch):
     assert "could not query" in doctor.probe_audio()
 
 
-def test_probe_audio_when_the_library_is_missing(monkeypatch):
-    class Broken(types.ModuleType):
-        def __getattr__(self, name):
-            raise OSError("PortAudio library not found")
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (ImportError("No module named 'sounddevice'"), "not installed"),
+        (OSError("PortAudio library not found"), "PortAudio library not found"),
+        (RuntimeError("PulseAudio_Initialize: Can't connect to server"), "Can't connect to server"),
+    ],
+)
+def test_probe_audio_reports_why_audio_is_unavailable(monkeypatch, error, expected):
+    """A missing library or sound server must be a doctor line, never a traceback."""
+    from jarvis.voice import audio
 
-    # importing sounddevice raises OSError when libportaudio is absent
-    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *a, **k):
-        if name == "sounddevice":
-            raise OSError("PortAudio library not found")
-        return real_import(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    assert "PortAudio library not found" in doctor.probe_audio()
+    monkeypatch.setattr(audio, "sd", None)
+    monkeypatch.setattr(audio, "_SD_ERROR", error)
+    text = doctor.probe_audio()
+    assert isinstance(text, str) and expected in text
+    if not isinstance(error, ImportError):
+        assert "libportaudio2" in text and "sound server" in text
+    assert "not installed" in audio.list_devices() or "could not start" in audio.list_devices()
 
 
 def test_whisper_models_cached(monkeypatch, tmp_path):
