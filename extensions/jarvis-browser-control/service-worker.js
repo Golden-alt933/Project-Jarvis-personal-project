@@ -27,6 +27,11 @@ let handshakeReady = false;
 let serverSelected = false;
 let paired = false;
 let authFailed = false;
+let authFailedAt = 0;
+// After a rejected token, try again this often instead of never: the rejection may
+// have come from a different Jarvis (another data folder, a test run) that has since
+// exited, and the alarm keeps this worker alive so the flag would otherwise stick.
+const AUTH_RETRY_MS = 60000;
 let clientId = null;
 let lastError = null;
 let lastServerMessage = 0;
@@ -174,6 +179,7 @@ function connect() {
       keepAliveTimer = null;
       if (event?.code === 1008) {
         authFailed = true;
+        authFailedAt = Date.now();
         lastError = "Jarvis rejected the pairing token. Paste the current one from `jarvis --browser-token`.";
         return;
       }
@@ -198,14 +204,21 @@ function reconnectNow() {
   return connect();
 }
 
+function onReconnectAlarm(alarm, now = Date.now()) {
+  if (alarm.name !== "jarvis-reconnect" || isLive(socket)) return;
+  if (authFailed) {
+    if (now - authFailedAt < AUTH_RETRY_MS) return;
+    authFailed = false;
+  }
+  connect();
+}
+
 chrome.runtime.onInstalled.addListener(connect);
 chrome.runtime.onStartup.addListener(connect);
 // Alarms wake a suspended service worker; the top-level connect() below then
 // restores the socket. The alarm is also the backstop when timers were lost.
 chrome.alarms.create("jarvis-reconnect", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "jarvis-reconnect" && !authFailed && !isLive(socket)) connect();
-});
+chrome.alarms.onAlarm.addListener((alarm) => onReconnectAlarm(alarm));
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.jarvisToken || changes.jarvisPort)) reconnectNow();
 });

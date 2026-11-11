@@ -116,7 +116,7 @@ test('reconnect backoff is bounded and resets after a successful handshake', asy
   assert.equal(vm.runInContext('handshakeReady', context), true);
 });
 
-test('a rejected token stops the retry loop until the user pastes a new one', async () => {
+test('a rejected token stops the fast retry loop', async () => {
   const { context, sockets, timers, Socket } = harness();
   await context.connect();
   sockets[0].readyState = Socket.CLOSED;
@@ -125,6 +125,21 @@ test('a rejected token stops the retry loop until the user pastes a new one', as
   assert.equal(timers.length, before, 'no reconnect timer after an authentication failure');
   assert.equal(vm.runInContext('authFailed', context), true);
   assert.match(vm.runInContext('lastError', context), /pairing token/);
+});
+
+test('after a rejected token the alarm retries once a minute, not never', async () => {
+  const { context, sockets, Socket } = harness();
+  await context.connect();
+  sockets[0].readyState = Socket.CLOSED;
+  sockets[0].listeners.close({ code: 1008 });
+  const rejectedAt = vm.runInContext('authFailedAt', context);
+  context.onReconnectAlarm({ name: 'jarvis-reconnect' }, rejectedAt + 30000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sockets.length, 1, 'too soon: no new attempt');
+  context.onReconnectAlarm({ name: 'jarvis-reconnect' }, rejectedAt + 61000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sockets.length, 2, 'a minute later it tries again');
+  assert.equal(vm.runInContext('authFailed', context), false);
 });
 
 test('command failures are sent back with their error type', async () => {
