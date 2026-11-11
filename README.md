@@ -16,7 +16,7 @@ Jarvis is a rebuild of an earlier project, Friday. See `docs/ARCHITECTURE.md` fo
 
 | Area | Windows 11 | Linux, X11 session | Linux, Wayland session |
 |---|---|---|---|
-| Chat, memory, files, web, notes, reminders | yes | yes | yes |
+| Chat, memory, files, web, notes, reminders, scheduled tasks | yes | yes | yes |
 | Hosted and local (Ollama) models, Ollama auto-start | yes | yes | yes |
 | `run_command` | PowerShell | bash (`bash -lc`) | bash (`bash -lc`) |
 | Open a file or URL | default handler | `xdg-open`, else `gio open` | same |
@@ -131,6 +131,8 @@ python -m jarvis                    # same as `jarvis`
 | `--hud`, `--hud-demo`, `--no-voice` | The HUD window (see below) |
 | `--devices` | List audio input/output devices and exit |
 | `--browser-token` | Print the Chrome extension pairing token and folder, then exit |
+| `--daemon` | Run scheduled tasks and proactive alerts with no window (text only); see "Scheduled tasks and the daemon" |
+| `--brief` | Print a short spoken-style briefing for today and exit |
 | `--no-wake` | Voice mode: every utterance is addressed to Jarvis, no wake word needed |
 
 If no key is configured, Jarvis says so, points to `jarvis --setup`, and exits with code 2.
@@ -207,6 +209,22 @@ Settings are read in this order, first match wins:
 | `JARVIS_VISION_MODEL` | empty | Hosted vision model; empty uses the provider default |
 | `OLLAMA_VISION_MODEL` | `qwen2.5vl:3b` | Local vision model |
 | `JARVIS_BROWSER_PORT` | `8765` | Loopback port for the Chrome extension bridge |
+| `JARVIS_TASK_GRACE_MINUTES` | `30` | A one-off scheduled task missed by more than this is reported, not run |
+| `JARVIS_TASK_DEFER_MINUTES` | `10` | A due task kept waiting this long (you were busy) is reported and skipped until its next slot |
+| `JARVIS_TASK_MAX_STEPS` | `12` | Tool-call steps in one unattended task run |
+| `JARVIS_TASK_TIME_BUDGET` | `240.0` | Seconds for one unattended task run |
+| `JARVIS_PROACTIVE` | `on` | `on` or `off`: proactive alerts (battery, disk, long turn) |
+| `JARVIS_WATCH_BATTERY` | `true` | Alert when the battery is low while unplugged |
+| `JARVIS_BATTERY_LOW` | `20` | First low-battery alert at this percent |
+| `JARVIS_BATTERY_CRITICAL` | `10` | Second, urgent alert at this percent |
+| `JARVIS_WATCH_BATTERY_FULL` | `false` | Alert when the battery is full and still plugged in |
+| `JARVIS_WATCH_DISK` | `true` | Alert when the system drive is nearly full |
+| `JARVIS_DISK_LOW_GB` | `10.0` | Disk alert below this much free space... |
+| `JARVIS_DISK_LOW_PERCENT` | `5.0` | ...or below this percent free |
+| `JARVIS_LONG_TURN_SECONDS` | `90` | Say "still working" after a turn runs this long; 0 turns it off |
+| `JARVIS_QUIET_HOURS` | empty | No proactive alerts in this window, for example `22:00-07:00`; empty means never quiet |
+| `JARVIS_MAIL_PROVIDER` | `auto` | `auto`, `gmail`, `outlook` or `mailto`; auto is Gmail when Chrome is connected, else the mail app |
+| `JARVIS_CALENDAR_PROVIDER` | `auto` | `auto`, `google`, `outlook` or `ics`; auto is Google when Chrome is connected, else an .ics file |
 | `JARVIS_DATA_DIR` | empty | Data folder; empty uses the per-user default below |
 <!-- config-table:end -->
 
@@ -249,6 +267,63 @@ The extension ships inside the installed package. Set up once:
 3. Click the extension's toolbar icon, paste the token, leave the port at `8765` (match `JARVIS_BROWSER_PORT` if you changed it) and click **Save and connect**.
 
 Jarvis listens on `127.0.0.1` only, for `chrome-extension://` origins, with the token required. Safety policy: reading, navigating, scrolling, clicking and typing run without asking; Jarvis asks before buying, paying, sending, posting, deleting, signing in, account changes, accepting terms and uploading files, and never types into password, card or one-time-code fields. Page text is treated as data, never as instructions.
+
+## Scheduled tasks and the daemon
+
+A **reminder** only tells you something at a time. A **scheduled task** is a request Jarvis carries out by itself with its tools: "every morning at nine, brief me", "in an hour, check whether my download finished", "every weekday at 6 pm remind me to log my hours and open the timesheet". Ask in plain words; Jarvis calls `schedule_task` and tells you the next run time. `list_scheduled_tasks`, `cancel_scheduled_task` and `run_scheduled_task_now` manage them, and "what did the 9 am task find?" is answered from the stored results (the last ten runs of each task are kept).
+
+Repeats are `once`, `hourly`, `daily`, `weekdays`, `weekly`, `monthly` or "every N minutes/hours/days" (at least 5 minutes; Jarvis asks you to confirm anything more often than hourly). A daily 9 am task stays at 9 am across daylight-saving changes; month-end days are clamped (the 31st runs on the 30th in April).
+
+How a run behaves:
+
+- It is an unattended agent turn in its **own conversation**, with a smaller budget than a chat turn (`JARVIS_TASK_MAX_STEPS`, `JARVIS_TASK_TIME_BUDGET`). Your conversation is untouched.
+- It never runs while you are in the middle of a turn, and never two at once. A task kept waiting for ten minutes is reported and skipped until its next slot.
+- After downtime a repeating task runs **at most once**, never a burst. A one-off task missed by more than 30 minutes is reported as missed, not run late.
+- **Confirmations.** Anything that needs your approval is declined, because nobody is there to give it, and the result says what was left undone. An unattended task never approves its own risky action. (The terminal, voice and HUD frontends decline too: they have no safe way to interrupt what you are doing with a question.)
+- The outcome is spoken (voice and HUD, once Jarvis is idle), printed (terminal), or shown as a desktop notification (daemon), and always saved.
+
+The tasks run while Jarvis is open in any mode. To run them with no window, start the daemon: `jarvis --daemon` (text only, logs to the data folder, no confirmations, results saved and shown as a notification where the OS has one: a Windows toast, or `notify-send` on Linux). It does not deliver reminders; those belong to the windows you talk to.
+
+**Start the daemon at login on Windows** (Task Scheduler, once, in PowerShell; use the path `Get-Command jarvis` prints):
+
+```powershell
+schtasks /Create /TN "Jarvis daemon" /SC ONLOGON /RL LIMITED /TR "\"C:\Users\YOU\.local\bin\jarvis.exe\" --daemon"
+```
+
+**On Linux** (systemd user unit), save as `~/.config/systemd/user/jarvis-daemon.service`, then run `systemctl --user enable --now jarvis-daemon`:
+
+```ini
+[Unit]
+Description=Jarvis scheduled tasks and alerts
+
+[Service]
+ExecStart=%h/.local/bin/jarvis --daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+**Daily briefing.** `jarvis --brief` prints a short spoken-style briefing (date, the weather for the home location if your memory has one, today's reminders and scheduled tasks; nothing that needs a sign-in). To have it every day, tell Jarvis "schedule a briefing every day at 9": it creates a daily task, and in voice or HUD mode the briefing is spoken.
+
+## Proactive alerts
+
+Jarvis can speak first, sparingly. These are plain checks with no model call: battery low while unplugged (20 percent, and again at 10), disk nearly full (under 10 GB or 5 percent free on the system drive), a "still working on that" after a turn runs 90 seconds, and, if you turn it on, battery full while plugged in. Each alert fires once per episode (it re-arms only after the battery is charged or the disk freed clearly beyond the threshold) and has a cool-down. They are delivered as one short sentence like reminders, never over speech or a turn, and not at all during quiet hours. Switch them with `JARVIS_PROACTIVE=off`, the `JARVIS_WATCH_*` settings, and `JARVIS_QUIET_HOURS=22:00-07:00` (see the reference table).
+
+## Errands (email, calendar, maps, messages)
+
+The errand tools open a **prefilled page for you to review**. They never send, save or book anything.
+
+| Ask | Tool | What opens |
+|---|---|---|
+| "Email Sam that I will be late" | `draft_email` | Gmail or Outlook compose in your signed-in Chrome, or your mail app (`mailto:`) |
+| "Put Design review on my calendar tomorrow at 3" | `create_calendar_event` | A new-event page in Google or Outlook calendar, or an `.ics` file saved to Documents and opened in your calendar app. The time is echoed in words so you can check it |
+| "Directions from India Gate to Connaught Place" | `open_map` | Google Maps search or directions |
+| "WhatsApp Priya that I am on my way" | `compose_message` | A `wa.me` link (number with country code), an `sms:` link, or Telegram's share page; you press send |
+
+`JARVIS_MAIL_PROVIDER` and `JARVIS_CALENDAR_PROVIDER` choose the service; `auto` means Google when Chrome is connected, else `mailto:` or an `.ics` file. If the page wants you to sign in, Jarvis says so and waits.
+
+**A booking, honestly.** There is no "book it" tool, and none is needed. Say "find me train options from Delhi to Mumbai next Friday and compare the three cheapest". With Chrome connected, Jarvis opens a public booking or search site, inspects the page, reads the results and gives you a short comparison. When you choose, it fills the passenger details from what you told it or from memory, and asks for anything missing instead of inventing it. **You sign in and enter payment details yourself**: Jarvis stops, says what is on the screen and waits, and the browser tools refuse to type into password and card fields at all. It also stops before the final step (pay, book, confirm) and reads back the summary; pressing that button asks you to confirm. What it did and did not do is reported plainly. It only works on sites Chrome can reach, and a site's layout or bot protection can still stop it.
 
 ## Documents, spreadsheets and the screen
 

@@ -24,6 +24,7 @@ from jarvis.config import Settings, config_files, get_settings, user_config_file
 from jarvis.interfaces.app import App, build_app
 from jarvis.llm.providers import ConfigError, describe
 from jarvis.llm.types import LLMClient, ToolCall
+from jarvis.proactive.runtime import start_background
 from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.tools.base import Risk
 
@@ -463,6 +464,12 @@ async def interactive(app: App, console: Console, *, verbose: bool) -> int:
 
     watcher = ReminderWatcher(getattr(app, "store", None), deliver, lambda: not busy)
     watcher.start()
+
+    async def announce(text: str) -> None:  # scheduled-task results and proactive alerts
+        renderer.pause()
+        console.print(Text(f"  ✦ {text}", style="bold cyan"))
+
+    background = start_background(app, announce, lambda: not busy, turn_active=lambda: busy, say_busy=announce)
     warned = False
     try:
         while True:
@@ -492,6 +499,7 @@ async def interactive(app: App, console: Console, *, verbose: bool) -> int:
                 busy = False
             console.print()
     finally:
+        await background.stop()
         await watcher.stop()
 
 
@@ -511,6 +519,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-voice", action="store_true", help="with --hud: text-only HUD, no microphone or speech models")
     p.add_argument("--devices", action="store_true", help="list audio devices and exit")
     p.add_argument("--browser-token", action="store_true", help="print the Chrome extension pairing token and folder, then exit")
+    p.add_argument("--daemon", action="store_true", help="run scheduled tasks and proactive alerts with no window (text only)")
+    p.add_argument("--brief", action="store_true", help="print a short spoken-style briefing for today and exit")
     p.add_argument("--no-wake", action="store_true", help="voice: treat every utterance as addressed to Jarvis")
     p.add_argument("--setup", action="store_true", help="first-run setup: choose a provider, store the API key, run the doctor")
     p.add_argument("--doctor", action="store_true", help="check the installation and configuration, with a fix for each problem")
@@ -637,6 +647,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--voice and --once cannot be combined")
     if (args.hud or args.hud_demo) and (args.voice or args.once is not None):
         parser.error("--hud cannot be combined with --voice or --once")
+    if args.daemon and (args.voice or args.hud or args.hud_demo or args.once is not None or args.brief):
+        parser.error("--daemon runs on its own; do not combine it with other modes")
+    if args.brief and (args.voice or args.hud or args.hud_demo or args.once is not None):
+        parser.error("--brief runs on its own; do not combine it with other modes")
     if args.version:
         print(f"jarvis {package_version()}")
         return 0
@@ -670,6 +684,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        if args.daemon or args.brief:
+            from jarvis.proactive.runtime import run_brief, run_daemon
+
+            job = run_daemon(app, console) if args.daemon else run_brief(app, console)
+            return asyncio.run(_with_cleanup(job, app.settings))
         resumed = False if args.new else app.resume()
         if args.once is not None:
             return asyncio.run(_with_cleanup(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose), app.settings))

@@ -8,7 +8,7 @@ import os
 import platform
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from jarvis import platform as plat
 from jarvis.tools.paths import known_folder
@@ -122,6 +122,21 @@ _LOCAL = (
 )
 
 
+_WEBSITES = (
+    "Working on websites. You drive the user's own Chrome with the browser tools. Call "
+    "browser_status first; if Chrome is not connected, tell the user what to do (the result "
+    "explains) and stop. Inspect a page before acting and again after every page change, "
+    "because element numbers go stale. For searches and bookings, gather the options (price, "
+    "time, availability) and give a short comparison before choosing, unless the user already "
+    "chose. Fill forms from what the user said or from memory, and ask for anything missing "
+    "instead of inventing it. The user signs in and enters payment details themselves: when a "
+    "site asks for either, stop, say exactly what is on screen and wait. Always stop before the "
+    "final irreversible step (pay, book, confirm, send), read back the summary and let the user "
+    "decide. Say truthfully what was and was not completed. For email, calendar, maps and "
+    "messages use the errand tools: they open a prefilled page that nothing leaves until the user says so."
+)
+
+
 def build_system_prompt(
     *,
     settings: "Settings",
@@ -130,6 +145,7 @@ def build_system_prompt(
     output_mode: str,
     is_local: bool,
     now: datetime | None = None,
+    tool_groups: Iterable[str] | None = None,
 ) -> str:
     sections = [
         _identity(settings),
@@ -138,6 +154,8 @@ def build_system_prompt(
         _SAFETY,
         _OUTPUT.get(output_mode, _OUTPUT["text"]),
     ]
+    if tool_groups is not None and "browser" in set(tool_groups):
+        sections.append(_WEBSITES)  # only when the browser tools are on offer this turn
     if is_local:
         sections.append(_LOCAL)
     return "\n\n".join(sections)

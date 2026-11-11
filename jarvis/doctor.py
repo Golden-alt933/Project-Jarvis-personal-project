@@ -307,6 +307,42 @@ def check_helpers() -> list[Check]:
     return checks
 
 
+def probe_tasks(settings: Settings) -> tuple[int, str | None]:
+    """(active scheduled tasks, earliest next run as UTC ISO). Read-only: never creates the database."""
+    import sqlite3
+
+    if not settings.db_path.is_file():
+        return 0, None
+    uri = settings.db_path.resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=2)
+    try:
+        has = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'scheduled_tasks'").fetchone()
+        if not has:
+            return 0, None
+        n, nxt = conn.execute("SELECT COUNT(*), MIN(next_run) FROM scheduled_tasks WHERE status = 'active'").fetchone()
+        return int(n), nxt
+    finally:
+        conn.close()
+
+
+def check_autonomy(settings: Settings) -> list[Check]:
+    from jarvis.proactive.tasks import format_local
+    from jarvis.proactive.watchers import build_watchers, proactive_enabled
+
+    try:
+        count, nxt = probe_tasks(settings)
+        detail = "no tasks stored" if count == 0 else f"{count} stored, next run {format_local(nxt)}"
+        tasks = Check("Scheduled tasks", PASS, detail + " (they run while Jarvis or `jarvis --daemon` is open)")
+    except Exception as exc:
+        tasks = Check("Scheduled tasks", WARN, f"could not read the task list ({type(exc).__name__})", "run: jarvis --new to check the memory database")
+    if not proactive_enabled(settings):
+        alerts = Check("Proactive alerts", SKIP, "off (JARVIS_PROACTIVE=off)")
+    else:
+        names = ", ".join(w.name for w in build_watchers(settings)) or "no watchers enabled"
+        alerts = Check("Proactive alerts", PASS, f"on: {names}")
+    return [tasks, alerts]
+
+
 def run_checks(settings: Settings, *, offline: bool = False) -> list[Check]:
     checks = [check_python(), check_platform(), check_config()]
     key = check_key(settings)
@@ -321,6 +357,7 @@ def run_checks(settings: Settings, *, offline: bool = False) -> list[Check]:
     checks.append(check_speech_models(settings, voice_installed))
     checks.append(check_gpu(voice_installed))
     checks.append(check_extension(settings))
+    checks.extend(check_autonomy(settings))
     checks.extend(check_helpers())
     return checks
 

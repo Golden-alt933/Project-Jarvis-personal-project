@@ -11,6 +11,7 @@ from rich.live import Live
 from rich.text import Text
 
 from jarvis.interfaces.app import App
+from jarvis.proactive.runtime import Background, start_background
 from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.voice.session import (
     ConfirmRequested,
@@ -174,15 +175,21 @@ async def run_voice(app: App, console: Console | None = None) -> int:
     wake = "" if not settings.require_wake_word else f" Say \"{settings.wake_word}\" to talk to me."
     console.print(Text(f"Voice mode is live.{wake} Ctrl+C to quit.", style="cyan"))
     watcher = ReminderWatcher(app.store, session.say, session.is_idle)
+    background = Background(None, None)
     task = asyncio.current_task()
     try:
         with Live(display, console=console, refresh_per_second=12, transient=False):
             watcher.start()
+            background = start_background(
+                app, session.say, session.is_idle, spoken=True, output_mode="voice",
+                turn_active=lambda: session.state is VoiceState.THINKING, say_busy=session.say,
+            )
             await session.run(greeting=GREETING)
     except (KeyboardInterrupt, asyncio.CancelledError):
         if task is not None:
             task.uncancel()  # asyncio.run turns Ctrl+C into a cancel of the main task
     finally:
+        await background.stop()
         await watcher.stop()
     console.print(Text("Goodbye.", style="dim"))
     return 0

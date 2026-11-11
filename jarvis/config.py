@@ -137,6 +137,29 @@ class Settings(BaseSettings):
     # Chrome extension bridge (loopback only)
     browser_bridge_port: int = Field(8765, alias="JARVIS_BROWSER_PORT")
 
+    # --- Autonomy: scheduled tasks, proactive alerts, errands -----------------------
+    # Scheduled tasks (an unattended agent turn at a set time)
+    task_grace_minutes: int = Field(30, alias="JARVIS_TASK_GRACE_MINUTES")
+    task_defer_minutes: int = Field(10, alias="JARVIS_TASK_DEFER_MINUTES")
+    task_max_steps: int = Field(12, alias="JARVIS_TASK_MAX_STEPS")
+    task_time_budget: float = Field(240.0, alias="JARVIS_TASK_TIME_BUDGET")
+
+    # Proactive alerts: short spoken or printed notices, no model call
+    proactive: str = Field("on", alias="JARVIS_PROACTIVE")  # on | off
+    watch_battery: bool = Field(True, alias="JARVIS_WATCH_BATTERY")
+    battery_low_percent: int = Field(20, alias="JARVIS_BATTERY_LOW")
+    battery_critical_percent: int = Field(10, alias="JARVIS_BATTERY_CRITICAL")
+    watch_battery_full: bool = Field(False, alias="JARVIS_WATCH_BATTERY_FULL")
+    watch_disk: bool = Field(True, alias="JARVIS_WATCH_DISK")
+    disk_low_gb: float = Field(10.0, alias="JARVIS_DISK_LOW_GB")
+    disk_low_percent: float = Field(5.0, alias="JARVIS_DISK_LOW_PERCENT")
+    long_turn_seconds: int = Field(90, alias="JARVIS_LONG_TURN_SECONDS")  # 0 turns the notice off
+    quiet_hours: str = Field("", alias="JARVIS_QUIET_HOURS")  # e.g. 22:00-07:00; empty = never quiet
+
+    # Errands: which web mail and calendar to prefill (auto = Google when Chrome is connected)
+    mail_provider: str = Field("auto", alias="JARVIS_MAIL_PROVIDER")  # auto | gmail | outlook | mailto
+    calendar_provider: str = Field("auto", alias="JARVIS_CALENDAR_PROVIDER")  # auto | google | outlook | ics
+
     data_dir_override: str = Field("", alias="JARVIS_DATA_DIR")
 
     @property

@@ -51,7 +51,9 @@ jarvis/
   vision/              capture.py, ocr.py (local RapidOCR), client.py (hosted or local vision model)
   browser/             bridge.py (loopback WebSocket server; extension_dir() finds the extension in a
                        checkout or inside the installed wheel), policy.py (which page actions ask first)
-  proactive/           scheduler.py (reminders that fire without being asked)
+  proactive/           scheduler.py (reminders that fire without being asked), tasks.py + taskstore.py +
+                       schedule_math.py (scheduled tasks), watchers.py (battery/disk/long-turn alerts),
+                       runtime.py (frontend wiring, --daemon, --brief), notify.py (desktop toast)
 extensions/
   jarvis-browser-control/   Chrome extension paired with the bridge by a token (copied into the
                             wheel as jarvis/browser/extension by hatch force-include)
@@ -197,3 +199,28 @@ extraction call per turn.
 Logic is ported, not the `Skill.execute(task)` wrappers: file search scoring,
 exact-once file edit with backup, the app shortcut resolver, reminders, documents/PDF,
 Excel, screen capture + OCR, and the Chrome extension bridge.
+
+## Autonomy: scheduled tasks, proactive alerts, errands
+
+Everything here is tools, scheduling and prompt guidance; nothing inspects the user's
+sentence. The model turns "every morning at nine, brief me" into a `schedule_task` call.
+
+- **Scheduled tasks** (`proactive/tasks.py`). A task is a plain-language instruction stored in
+  SQLite with a repeat rule and the first run's wall-clock time. `TaskScheduler` polls, claims a
+  due slot with a compare-and-set UPDATE (so the daemon and a window cannot both run it, and a
+  crash never repeats it), advances the schedule *before* running (at most one catch-up run), and
+  runs the task as an unattended turn of a sibling `Agent` in its own conversation with a smaller
+  step and time budget. It waits for the frontend to be idle, runs one task at a time, and skips a
+  task deferred for ten minutes. Calendar arithmetic (`schedule_math.py`) works in zone-aware local
+  time: DST keeps "9 am" at 9 am, a nonexistent time runs just after the gap, a repeated hour runs
+  once, and a next run further away than its rule allows (clock set back) is recomputed.
+- **Unattended safety.** The run's `confirm` callback declines everything unless a frontend supplied
+  a way to ask the present user; the decline is recorded in the result. No frontend supplies one yet.
+- **Proactive watchers** (`proactive/watchers.py`). Pure state machines (episode, hysteresis,
+  cool-down, quiet hours) over injected sensors and clock; no model call. Delivered through the same
+  `say` path as reminders, only when the user is idle.
+- **Errands** (`tools/builtin/errands.py`, group `errands`). Pure URL and .ics builders plus thin
+  tools that open the result in the JARVIS Chrome tab group when the extension is connected, else in
+  the default browser or app. They prefill and never send or save. Multi-step website work uses the
+  browser tools, steered by the "working on websites" prompt section, which is added only when the
+  browser tool group is offered to the model (`build_system_prompt(tool_groups=...)`).
