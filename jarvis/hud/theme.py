@@ -110,7 +110,8 @@ class PaletteBlend:
 @lru_cache(maxsize=1)
 def _family() -> str:
     families = set(QFontDatabase.families())
-    for name in ("Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI"):
+    # Windows faces first, then the usual Linux and macOS ones.
+    for name in ("Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Inter", "Cantarell", "Ubuntu", "Noto Sans", "SF Pro Display", "DejaVu Sans"):
         if name in families:
             return name
     return QFont().family()
@@ -119,7 +120,7 @@ def _family() -> str:
 @lru_cache(maxsize=1)
 def _mono_family() -> str:
     families = set(QFontDatabase.families())
-    for name in ("Cascadia Code", "Cascadia Mono", "Consolas"):
+    for name in ("Cascadia Code", "Cascadia Mono", "Consolas", "JetBrains Mono", "Ubuntu Mono", "Noto Sans Mono", "DejaVu Sans Mono", "Menlo"):
         if name in families:
             return name
     return "monospace"

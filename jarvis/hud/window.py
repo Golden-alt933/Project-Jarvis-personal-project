@@ -125,7 +125,7 @@ def make_tray_icon() -> QIcon:
 
 MENU_STYLE = (
     "QMenu{background:#0B1222;border:1px solid rgba(255,255,255,30);border-radius:10px;padding:6px;"
-    "color:#DCEBFA;font-family:'Segoe UI';font-size:12px;}"
+    "color:#DCEBFA;font-family:'Segoe UI','Inter','Cantarell','Ubuntu','Noto Sans',sans-serif;font-size:12px;}"
     "QMenu::item{padding:7px 22px 7px 14px;border-radius:6px;}"
     "QMenu::item:selected{background:rgba(94,230,255,40);}"
     "QMenu::separator{height:1px;background:rgba(255,255,255,24);margin:5px 8px;}"

@@ -683,7 +683,8 @@ def test_compact_capsule_width_is_constant_and_fits_every_word(tmp_path: Path) -
 def test_glass_body_is_nearly_opaque() -> None:
     from jarvis.hud.widgets import GLASS_OPACITY_BOTTOM, GLASS_OPACITY_TOP
 
-    assert 0.94 <= GLASS_OPACITY_BOTTOM <= GLASS_OPACITY_TOP <= 0.97
+    # Opaque enough that bright text behind the window does not ghost through, yet not solid.
+    assert 0.94 <= GLASS_OPACITY_BOTTOM <= GLASS_OPACITY_TOP <= 0.99
 
 
 def test_speaking_palette_is_clearly_cyan() -> None:
