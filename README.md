@@ -200,7 +200,15 @@ Settings are read in this order, first match wins:
 | `JARVIS_STT_MODEL` | `auto` | Whisper model: `auto`, `tiny.en`, `base.en`, `small.en`, ... |
 | `JARVIS_STT_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
 | `JARVIS_TTS_VOICE` | `en_GB-alan-medium` | Piper voice |
-| `JARVIS_TTS_SPEED` | `1.0` | Speech speed multiplier |
+| `JARVIS_TTS_SPEED` | `1.0` | Piper speech speed multiplier |
+| `JARVIS_TTS_PROVIDER` | `auto` | `auto`, `edge`, `nvidia` or `piper`; see "Voice mode" (`auto` is Piper only with `jarvis --local`) |
+| `JARVIS_TTS_ONLINE_VOICE` | empty | Online voice; empty is `en-GB-RyanNeural` (Edge) or `Magpie-Multilingual.EN-US.Ray.Calm` (NVIDIA) |
+| `JARVIS_TTS_RATE` | `-5%` | Edge speaking rate, for example `-10%` or `+5%` |
+| `JARVIS_TTS_PITCH` | `+0Hz` | Edge pitch, for example `-3Hz` |
+| `JARVIS_STT_PROVIDER` | `auto` | `auto`, `local`, `nvidia` or `openai`; see "Voice mode" |
+| `JARVIS_STT_BASE_URL` | empty | `openai` recogniser: API base URL, for example `https://api.groq.com/openai/v1` |
+| `JARVIS_STT_API_KEY` | empty | `openai` recogniser: its key (sent only to that URL) |
+| `JARVIS_STT_ONLINE_MODEL` | empty | Online model; empty is `parakeet-ctc-1.1b` (NVIDIA) or `whisper-large-v3-turbo` (Groq) / `whisper-1` |
 | `JARVIS_INPUT_DEVICE` | empty | Microphone name or index; empty is the system default |
 | `JARVIS_OUTPUT_DEVICE` | empty | Speaker name or index; empty is the system default |
 | `JARVIS_VISION_PROVIDER` | `auto` | `auto`, `cloud` or `local`; `local` keeps images on this machine |

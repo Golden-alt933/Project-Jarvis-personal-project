@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     input_device: str = Field("", alias="JARVIS_INPUT_DEVICE")  # empty = system default
     output_device: str = Field("", alias="JARVIS_OUTPUT_DEVICE")
 
+    # Online speech (free services; the local engines stay as the offline fallback)
+    # auto = Edge voice, then NVIDIA if a key is set, then Piper (local mode: Piper only)
+    tts_provider: str = Field("auto", alias="JARVIS_TTS_PROVIDER")  # auto | edge | nvidia | piper
+    tts_online_voice: str = Field("", alias="JARVIS_TTS_ONLINE_VOICE")  # empty = the provider's default
+    tts_rate: str = Field("-5%", alias="JARVIS_TTS_RATE")  # Edge speaking rate, e.g. -10% or +5%
+    tts_pitch: str = Field("+0Hz", alias="JARVIS_TTS_PITCH")  # Edge pitch, e.g. -3Hz
+    # auto = hosted recogniser if a key is set (idle audio is still gated locally), else local
+    stt_provider: str = Field("auto", alias="JARVIS_STT_PROVIDER")  # auto | local | nvidia | openai
+    stt_base_url: str = Field("", alias="JARVIS_STT_BASE_URL")  # openai: e.g. https://api.groq.com/openai/v1
+    stt_api_key: str = Field("", alias="JARVIS_STT_API_KEY")
+    stt_online_model: str = Field("", alias="JARVIS_STT_ONLINE_MODEL")  # empty = the provider's default
+
     # Screen vision
     # auto = hosted vision model if one works on the configured key, else local Ollama;
     # local = images never leave this machine.

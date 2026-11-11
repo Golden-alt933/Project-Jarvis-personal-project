@@ -304,6 +304,8 @@ class World:
         self.whisper = ["faster-whisper-base.en"]
         self.cuda = 0
         self.smi = False
+        self.tts = (doctor.PASS, "edge en-GB-RyanNeural answered", "")
+        self.stt = (doctor.PASS, "nvidia parakeet-ctc-1.1b answered")
 
 
 @pytest.fixture
@@ -317,6 +319,8 @@ def world(monkeypatch, tmp_path, fake_platform):
     monkeypatch.setattr(doctor, "probe_hosted", hosted)
     monkeypatch.setattr(doctor, "find_ollama", lambda: w.ollama_exe)
     monkeypatch.setattr(doctor, "probe_ollama", lambda s: w.ollama)
+    monkeypatch.setattr(doctor, "probe_online_tts", lambda s: w.tts)
+    monkeypatch.setattr(doctor, "probe_online_stt", lambda s: w.stt)
     monkeypatch.setattr(doctor, "module_present", lambda m: w.modules is None or m in w.modules)
     monkeypatch.setattr(doctor, "probe_audio", lambda: w.audio)
     monkeypatch.setattr(doctor, "whisper_models_cached", lambda: w.whisper)
@@ -336,6 +340,28 @@ def settings(tmp_path, **kw) -> Settings:
 
 def by_name(checks):
     return {c.name: c for c in checks}
+
+
+def test_doctor_reports_which_speech_engines_are_active(world, tmp_path):
+    c = by_name(doctor.run_checks(settings(tmp_path, tts_provider="edge", stt_provider="nvidia")))
+    assert c["Speech synthesis"].status == doctor.PASS and "edge en-GB-RyanNeural" in c["Speech synthesis"].detail
+    assert "piper" in c["Speech synthesis"].detail  # the local fallback is shown
+    assert c["Speech recognition"].status == doctor.PASS and "only for speech addressed to Jarvis" in c["Speech recognition"].detail
+    world.tts = (doctor.WARN, "not answering: edge (OSError)", "")
+    world.stt = (doctor.WARN, "nvidia parakeet-ctc-1.1b did not answer (TimeoutError)")
+    c = by_name(doctor.run_checks(settings(tmp_path, tts_provider="edge", stt_provider="nvidia")))
+    assert c["Speech synthesis"].status == doctor.WARN and "Piper" in c["Speech synthesis"].fix
+    assert c["Speech recognition"].status == doctor.WARN and "local" in c["Speech recognition"].fix
+
+
+def test_doctor_speech_probes_are_skipped_offline_and_local_mode_is_local(world, tmp_path):
+    world.tts = world.stt = None  # would blow up if probed
+    c = by_name(doctor.run_checks(settings(tmp_path, tts_provider="edge", stt_provider="nvidia"), offline=True))
+    assert c["Speech synthesis"].status == doctor.SKIP and "--offline" in c["Speech synthesis"].detail
+    assert c["Speech recognition"].status == doctor.SKIP and "--offline" in c["Speech recognition"].detail
+    c = by_name(doctor.run_checks(settings(tmp_path, provider="ollama")))
+    assert c["Speech synthesis"].detail.startswith("local: piper")
+    assert c["Speech recognition"].detail.startswith("local:")
 
 
 def test_healthy_machine_exits_zero_and_never_prints_the_key(world, tmp_path):

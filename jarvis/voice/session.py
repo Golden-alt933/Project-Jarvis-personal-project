@@ -16,6 +16,7 @@ blocked, so the microphone keeps being processed while Jarvis thinks and speaks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import enum
 import logging
@@ -263,12 +264,8 @@ class VoiceSession:
         self._saying += 1
         epoch = self._epoch
         try:
-            audio = await self._synthesize(text)
-            if audio is None or epoch != self._epoch:
+            if not await self._play_sentence(text, lambda: epoch == self._epoch):
                 return
-            self._set_state(VoiceState.SPEAKING)
-            self.speaker.play(audio, self.synthesizer.sample_rate)
-            self._emit(Spoke(text))
             await self.speaker.drain()
         finally:
             self._saying -= 1
@@ -423,8 +420,22 @@ class VoiceSession:
             finally:
                 self._utt_q.task_done()
 
-    async def _transcribe(self, utterance: Utterance) -> Transcript | None:
+    def _addressed_a_priori(self, barge: bool) -> bool:
+        """Known to be for Jarvis before anything is transcribed: a barge-in, an answer to a
+        confirmation, no wake word needed, or a reply inside the quiet follow-up window."""
+        return bool(
+            barge
+            or self._confirming == "listening"
+            or not self.settings.require_wake_word
+            or (self.clock() < self._followup_until and not self._busy())
+        )
+
+    async def _transcribe(self, utterance: Utterance, barge: bool = False) -> Transcript | None:
         try:
+            if getattr(self.transcriber, "gated", False):  # online recogniser behind a local wake-word gate
+                return await self.transcriber.transcribe(
+                    utterance.pcm, hint=self.settings.wake_word, addressed=self._addressed_a_priori(barge)
+                )
             return await self.transcriber.transcribe(utterance.pcm, hint=self.settings.wake_word)
         except asyncio.CancelledError:
             raise
@@ -443,7 +454,7 @@ class VoiceSession:
             return
         if self._confirming == "asking":
             return  # probably the question itself coming back through the mic
-        transcript = await self._transcribe(item.utterance)
+        transcript = await self._transcribe(item.utterance, item.barge)
         text = transcript.text.strip() if transcript is not None else ""
         confidence = transcript.confidence if transcript is not None else 0.0
         if self._confirming == "listening":
@@ -599,21 +610,93 @@ class VoiceSession:
                     continue
                 if turn.cancelled or epoch != self._epoch:
                     continue
-                audio = await self._synthesize(sentence)
-                if audio is None or turn.cancelled or epoch != self._epoch:
-                    continue
-                self._set_state(VoiceState.SPEAKING)
-                self.speaker.play(audio, self.synthesizer.sample_rate)
-                self._emit(Spoke(sentence))
+                await self._play_sentence(sentence, lambda: not turn.cancelled and epoch == self._epoch)
             finally:
                 turn.queue.task_done()
 
+    async def _play_sentence(self, sentence: str, still_wanted: Callable[[], bool]) -> bool:
+        """Synthesize and queue one sentence. Engines with ``synthesize_stream`` are played
+        chunk by chunk as the audio arrives; the others return one array. True if audio played."""
+        stream = getattr(self.synthesizer, "synthesize_stream", None)
+        if stream is None or sentence in self._stock:
+            audio = await self._synthesize(sentence)
+            if audio is None or not still_wanted():
+                return False
+            self._set_state(VoiceState.SPEAKING)
+            self.speaker.play(audio, self.synthesizer.sample_rate)
+            self._emit(Spoke(sentence))
+            return True
+        played = False
+        try:
+            async with contextlib.aclosing(stream(sentence)) as chunks:
+                async for chunk in chunks:
+                    if not still_wanted():
+                        break
+                    if chunk is None or not len(chunk):
+                        continue
+                    if not played:
+                        self._set_state(VoiceState.SPEAKING)
+                        self._emit(Spoke(sentence))
+                    self.speaker.play(chunk, self.synthesizer.sample_rate)
+                    played = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("synthesis failed for %r", sentence[:60])
+        return played
+
+    # -- stock phrases: cached on disk per voice so later starts need no synthesis
+    def _stock_file(self, key: str, phrase: str):
+        import hashlib
+
+        name = hashlib.sha1(f"{key}|{phrase}".encode()).hexdigest()[:20]
+        return self.settings.data_dir / "stock" / f"{name}.npz"
+
+    def _load_stock(self, key: str, phrase: str) -> np.ndarray | None:
+        try:
+            with np.load(self._stock_file(key, phrase)) as data:
+                if int(data["rate"]) != self.synthesizer.sample_rate:
+                    return None
+                return data["audio"].astype(np.float32) / 32768.0
+        except Exception:
+            return None
+
+    def _save_stock(self, key: str, phrase: str, audio: np.ndarray) -> None:
+        try:
+            path = self._stock_file(key, phrase)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+            tmp = path.with_suffix(".tmp.npz")
+            np.savez(tmp, audio=pcm, rate=self.synthesizer.sample_rate)
+            tmp.replace(path)
+        except Exception:
+            log.debug("could not cache stock phrase", exc_info=True)
+
     async def prepare(self) -> None:
-        """Synthesize the stock phrases once, so acknowledgements play with no delay."""
-        for phrase in (*FILLERS, ACK_TEXT, APOLOGY_TEXT, CONFIRM_ACK_YES, CONFIRM_ACK_NO):
+        """Make the stock phrases available, so acknowledgements play with no delay. Phrases
+        are loaded from the on-disk cache when the active voice has them, else synthesized
+        (concurrently) and cached."""
+        synth = self.synthesizer
+        key_now = getattr(synth, "stock_key", None) or (lambda: getattr(synth, "cache_key", None))
+
+        async def one(phrase: str) -> None:
+            key = key_now()
+            if key is not None:
+                cached = self._load_stock(key, phrase)
+                if cached is not None:
+                    self._stock[phrase] = cached
+                    return
             audio = await self._synthesize(phrase)
-            if audio is not None:
-                self._stock[phrase] = audio
+            if audio is None:
+                return
+            self._stock[phrase] = audio
+            used = getattr(synth, "last_key", key)
+            if used is not None:
+                self._save_stock(used, phrase, audio)
+
+        phrases = [*FILLERS, ACK_TEXT, APOLOGY_TEXT, CONFIRM_ACK_YES, CONFIRM_ACK_NO]
+        await one(phrases[0])  # alone first: if the online voice is down, only this one pays for finding out
+        await asyncio.gather(*(one(p) for p in phrases[1:]))
 
     async def _synthesize(self, text: str) -> np.ndarray | None:
         cached = self._stock.get(text)

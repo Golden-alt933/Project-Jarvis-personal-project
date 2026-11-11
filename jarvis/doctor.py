@@ -30,7 +30,7 @@ EXTRAS: dict[str, tuple[str, ...]] = {
     "office": ("openpyxl", "pypdf", "docx"),
     "screen": ("mss", "PIL", "rapidocr_onnxruntime"),
     "browser": ("websockets",),
-    "voice": ("numpy", "sounddevice", "faster_whisper", "piper", "onnxruntime"),
+    "voice": ("numpy", "sounddevice", "faster_whisper", "piper", "onnxruntime", "av", "edge_tts", "riva"),
     "hud": ("PyQt6", "qasync"),
 }
 
@@ -278,6 +278,85 @@ def check_speech_models(settings: Settings, voice_installed: bool) -> Check:
     )
 
 
+SPEECH_PROBE_TIMEOUT = 8.0
+
+
+def probe_online_tts(settings: Settings) -> tuple[str, str, str]:
+    """(status, detail, engine names): synthesize one word with each online engine."""
+    import asyncio
+
+    from jarvis.voice.tts import FallbackSynthesizer, build_synthesizer
+
+    synth = build_synthesizer(settings)
+    if not isinstance(synth, FallbackSynthesizer):
+        return SKIP, "", synth.name
+    online = synth.engines[:-1]
+    names = " > ".join(e.name for e in synth.engines)
+    results = []
+    for engine in online:
+        try:
+            audio = asyncio.run(asyncio.wait_for(engine.synthesize("Ready."), SPEECH_PROBE_TIMEOUT))
+            results.append((engine.name, len(audio) > 0, ""))
+        except Exception as exc:
+            results.append((engine.name, False, type(exc).__name__))
+    ok = [n for n, good, _ in results if good]
+    if len(ok) == len(results):
+        return PASS, f"{', '.join(ok)} answered", names
+    bad = ", ".join(f"{n} ({why})" for n, good, why in results if not good)
+    return WARN, f"not answering: {bad}", names
+
+
+def probe_online_stt(settings: Settings) -> tuple[str, str]:
+    """(status, detail) for the online recogniser, with one short silent request."""
+    import asyncio
+
+    import numpy as np
+
+    from jarvis.voice.stt import build_transcriber
+    from jarvis.voice.stt_online import GatedTranscriber
+
+    transcriber = build_transcriber(settings)
+    if not isinstance(transcriber, GatedTranscriber):
+        return SKIP, transcriber.name
+    try:
+        asyncio.run(asyncio.wait_for(transcriber.online.transcribe(np.zeros(8000, dtype=np.float32)), SPEECH_PROBE_TIMEOUT))
+    except Exception as exc:
+        return WARN, f"{transcriber.online.name} did not answer ({type(exc).__name__})"
+    return PASS, f"{transcriber.online.name} answered"
+
+
+def check_speech_engines(settings: Settings, voice_installed: bool, offline: bool) -> list[Check]:
+    """Which engines speech will use, and whether the online ones answer."""
+    if not voice_installed:
+        return [Check("Speech synthesis", SKIP, "voice extra not installed"),
+                Check("Speech recognition", SKIP, "voice extra not installed")]
+    from jarvis.voice.stt import resolve_stt_provider
+    from jarvis.voice.tts import build_synthesizer, FallbackSynthesizer
+
+    checks = []
+    synth = build_synthesizer(settings)
+    if isinstance(synth, FallbackSynthesizer):
+        chain = " > ".join(e.name for e in synth.engines)
+        if offline:
+            checks.append(Check("Speech synthesis", SKIP, f"online: {chain} (not probed: --offline)"))
+        else:
+            status, detail, _ = probe_online_tts(settings)
+            fix = "" if status == PASS else "speech falls back to the local Piper voice; check your connection"
+            checks.append(Check("Speech synthesis", status, f"online, falls back to local: {chain}; {detail}", fix))
+    else:
+        checks.append(Check("Speech synthesis", PASS, f"local: {synth.name}"))
+    stt = resolve_stt_provider(settings)
+    if stt == "local":
+        checks.append(Check("Speech recognition", PASS, "local: faster-whisper on this machine; no audio leaves it"))
+    elif offline:
+        checks.append(Check("Speech recognition", SKIP, f"online ({stt}), wake word gated locally (not probed: --offline)"))
+    else:
+        status, detail = probe_online_stt(settings)
+        fix = "" if status == PASS else "recognition falls back to the local model; check the key and your connection"
+        checks.append(Check("Speech recognition", status, f"online, only for speech addressed to Jarvis: {detail}", fix))
+    return checks
+
+
 def check_gpu(voice_installed: bool) -> Check:
     if not voice_installed:
         return Check("Speech GPU", SKIP, "voice extra not installed")
@@ -319,6 +398,7 @@ def run_checks(settings: Settings, *, offline: bool = False) -> list[Check]:
     voice_installed = next(c for c in extras if c.name == "Extra: voice").status == PASS
     checks.append(check_audio(voice_installed))
     checks.append(check_speech_models(settings, voice_installed))
+    checks.extend(check_speech_engines(settings, voice_installed, offline))
     checks.append(check_gpu(voice_installed))
     checks.append(check_extension(settings))
     checks.extend(check_helpers())

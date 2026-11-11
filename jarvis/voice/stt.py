@@ -7,6 +7,7 @@ Device/model selection ("auto") is encoded from measurements on the target machi
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import math
 import os
@@ -39,6 +40,9 @@ AUTO_BENCHMARK = "measured 2026-11-11"
 AUTO_MODEL_CPU = "base.en"
 AUTO_MODEL_CUDA = "distil-small.en"
 MIN_FREE_VRAM_MB = 1200
+# When an online recogniser is active, this small CPU model only decides whether speech is
+# addressed to Jarvis (measured 0.3-0.4 s per utterance on the CPU on 2026-11-11).
+GATE_MODEL = "tiny.en"
 
 # Whisper invents these on near-silent input. Real replies like "yes"/"stop" are not listed.
 _HALLUCINATIONS = frozenset(
@@ -276,5 +280,54 @@ class WhisperTranscriber:
         return await asyncio.to_thread(self._transcribe_blocking, pcm, hint)
 
 
-def build_transcriber(settings: Settings) -> WhisperTranscriber:
-    return WhisperTranscriber(settings.stt_model, settings.stt_device)
+def resolve_stt_provider(settings: Settings) -> str:
+    """local | nvidia | openai. `auto` is online only when a recogniser is configured and
+    Jarvis is not in local mode (provider ollama)."""
+    choice = (settings.stt_provider or "auto").strip().lower()
+    if choice not in {"auto", "local", "nvidia", "openai"}:
+        log.warning("Unknown JARVIS_STT_PROVIDER %r; using auto", choice)
+        choice = "auto"
+    if choice == "local":
+        return "local"
+    if choice == "auto":
+        if settings.provider.strip().lower() == "ollama":
+            return "local"
+        if settings.stt_base_url and settings.stt_api_key:
+            choice = "openai"
+        elif settings.nvidia_api_key and importlib.util.find_spec("riva") is not None:
+            choice = "nvidia"
+        else:
+            return "local"
+    if choice == "openai" and not settings.stt_base_url:
+        log.warning("JARVIS_STT_PROVIDER=openai needs JARVIS_STT_BASE_URL; using local recognition")
+        return "local"
+    if choice == "nvidia" and not settings.nvidia_api_key:
+        log.warning("JARVIS_STT_PROVIDER=nvidia needs NVIDIA_API_KEY; using local recognition")
+        return "local"
+    return choice
+
+
+def build_transcriber(settings: Settings):
+    """The local Whisper alone, or a wake-word gate in front of an online recogniser."""
+    choice = resolve_stt_provider(settings)
+    if choice == "local":
+        return WhisperTranscriber(settings.stt_model, settings.stt_device)
+    from jarvis.voice.stt_online import GatedTranscriber, OpenAICompatTranscriber, RivaTranscriber
+
+    if choice == "nvidia":
+        online = RivaTranscriber(settings.nvidia_api_key, settings.stt_online_model)
+    else:
+        online = OpenAICompatTranscriber(settings.stt_base_url, settings.stt_api_key, settings.stt_online_model)
+
+    wake = settings.wake_word
+
+    def is_addressed(text: str) -> bool:
+        from jarvis.voice.session import contains_wake_word, split_wake_word
+
+        return split_wake_word(text, wake)[0] or contains_wake_word(text, wake)
+
+    # Nothing about the GPU is loaded here: the gate is tiny.en on the CPU, loaded lazily.
+    return GatedTranscriber(
+        WhisperTranscriber(GATE_MODEL, "cpu"), online, is_addressed,
+        full_local_factory=lambda: WhisperTranscriber(settings.stt_model, settings.stt_device),
+    )

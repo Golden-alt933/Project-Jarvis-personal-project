@@ -8,11 +8,13 @@ answer is still being generated.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -328,5 +330,211 @@ class PiperSynthesizer:
         return await asyncio.to_thread(self._synthesize_blocking, text)
 
 
-def build_synthesizer(settings: Settings) -> PiperSynthesizer:
-    return PiperSynthesizer(settings.tts_voice, settings.voices_dir, settings.tts_speed)
+    @property
+    def cache_key(self) -> str:
+        return f"piper:{self.voice}:{self.speed:g}"
+
+
+# --------------------------------------------------------------- online + fallback
+
+OUTPUT_RATE = 24000  # FallbackSynthesizer always speaks at this rate, whichever engine answered
+
+
+def resample_audio(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
+    """Resample float32 mono with PyAV (declared dependency of the voice extra)."""
+    if src == dst or len(audio) == 0:
+        return audio
+    import av
+
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=dst)
+    frame = av.AudioFrame.from_ndarray(np.asarray(audio, dtype=np.float32).reshape(1, -1), format="flt", layout="mono")
+    frame.sample_rate = src
+    parts = [f.to_ndarray().reshape(-1) for f in [*resampler.resample(frame), *resampler.resample(None)]]
+    return np.concatenate(parts).astype(np.float32, copy=False) if parts else np.zeros(0, dtype=np.float32)
+
+
+class FallbackSynthesizer:
+    """Tries engines in order, per sentence; the last one (Piper) is the offline floor.
+
+    An engine that raises, or has not produced its first audio within ``deadline`` seconds,
+    is skipped for ``cooloff`` seconds (one warning is logged), and the sentence is spoken
+    by the next engine. If an engine fails after it already produced audio the rest of
+    that sentence is dropped rather than repeated from the start by another voice.
+    Engines may offer ``synthesize_stream`` (an async iterator of arrays); this class
+    offers it too, so playback can begin before a sentence is complete.
+    """
+
+    def __init__(
+        self,
+        engines: list,
+        *,
+        deadline: float = 2.5,
+        chunk_deadline: float = 6.0,
+        cooloff: float = 120.0,
+        clock=time.monotonic,
+        sample_rate: int = OUTPUT_RATE,
+    ) -> None:
+        if not engines:
+            raise ValueError("FallbackSynthesizer needs at least one engine")
+        self.engines = list(engines)
+        self.deadline = deadline
+        self.chunk_deadline = chunk_deadline
+        self.cooloff = cooloff
+        self.clock = clock
+        self.sample_rate = sample_rate
+        self._down_until = [0.0] * len(self.engines)
+        self._was_down = [False] * len(self.engines)
+        self._last = 0
+
+    # -- state
+    def _cooling(self, index: int) -> bool:
+        return index < len(self.engines) - 1 and self.clock() < self._down_until[index]
+
+    def _active(self) -> int:
+        return next((i for i in range(len(self.engines)) if not self._cooling(i)), len(self.engines) - 1)
+
+    @property
+    def name(self) -> str:
+        return self.engines[self._active()].name
+
+    @property
+    def active_engine(self):
+        return self.engines[self._active()]
+
+    def stock_key(self) -> str:
+        """Identity of the voice that would speak right now (stock phrases are cached per voice)."""
+        return getattr(self.engines[self._active()], "cache_key", self.engines[self._active()].name)
+
+    @property
+    def last_key(self) -> str:
+        engine = self.engines[self._last]
+        return getattr(engine, "cache_key", engine.name)
+
+    def _mark_down(self, index: int, reason: object) -> None:
+        self._down_until[index] = self.clock() + self.cooloff
+        if not self._was_down[index]:
+            log.warning(
+                "Speech engine %s is unavailable (%s); using %s for the next %.0f s",
+                self.engines[index].name, reason or "timeout", self.engines[-1].name, self.cooloff,
+            )
+        self._was_down[index] = True
+
+    def _mark_ok(self, index: int) -> None:
+        if self._was_down[index]:
+            log.info("Speech engine %s is back", self.engines[index].name)
+        self._was_down[index] = False
+        self._last = index
+
+    # -- engines
+    async def _chunks(self, engine, text: str, deadline: float | None):
+        if hasattr(engine, "synthesize_stream"):
+            stream = engine.synthesize_stream(text)
+            async with contextlib.aclosing(stream):
+                limit = deadline
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(stream.__anext__(), limit)
+                    except StopAsyncIteration:
+                        return
+                    limit = None if deadline is None else self.chunk_deadline
+                    yield resample_audio(chunk, engine.sample_rate, self.sample_rate)
+        else:
+            audio = await asyncio.wait_for(engine.synthesize(text), deadline)
+            yield resample_audio(audio, engine.sample_rate, self.sample_rate)
+
+    async def synthesize_stream(self, text: str):
+        last_index = len(self.engines) - 1
+        for index, engine in enumerate(self.engines):
+            if self._cooling(index):
+                continue
+            deadline = None if index == last_index else self.deadline
+            started = False
+            try:
+                async with contextlib.aclosing(self._chunks(engine, text, deadline)) as chunks:
+                    async for chunk in chunks:
+                        if len(chunk):
+                            if not started:
+                                started = True
+                                self._mark_ok(index)
+                            yield chunk
+                if not started and index != last_index and clean_for_speech(text):
+                    raise RuntimeError("no audio")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if index == last_index:
+                    raise
+                self._mark_down(index, str(exc) or type(exc).__name__)
+                if started:
+                    return  # part of the sentence was already played
+
+    async def synthesize(self, text: str) -> np.ndarray:
+        parts = [chunk async for chunk in self.synthesize_stream(text)]
+        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+
+    async def warm_up(self) -> None:
+        last_index = len(self.engines) - 1
+        for index, engine in enumerate(self.engines):
+            if self._cooling(index):
+                continue
+            try:
+                await asyncio.wait_for(engine.warm_up(), None if index == last_index else self.deadline * 2)
+                self._last = index
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if index == last_index:
+                    raise
+                self._mark_down(index, str(exc) or type(exc).__name__)
+
+
+def resolve_tts_provider(settings: Settings) -> str:
+    """The provider order `auto` stands for, or the explicit choice.
+
+    auto: Edge (British voice, no key), then NVIDIA when a key is set, then Piper. In local
+    mode (provider ollama) nothing leaves the machine, so auto means Piper only.
+    """
+    choice = (settings.tts_provider or "auto").strip().lower()
+    if choice not in {"auto", "edge", "nvidia", "piper"}:
+        log.warning("Unknown JARVIS_TTS_PROVIDER %r; using auto", choice)
+        choice = "auto"
+    return choice
+
+
+def build_synthesizer(settings: Settings):
+    """Piper alone, or online engines in front of it (see FallbackSynthesizer)."""
+    piper = PiperSynthesizer(settings.tts_voice, settings.voices_dir, settings.tts_speed)
+    choice = resolve_tts_provider(settings)
+    wanted: list[str]
+    if choice == "piper":
+        return piper
+    if choice == "auto":
+        if settings.provider.strip().lower() == "ollama":
+            return piper
+        wanted = ["edge"] + (["nvidia"] if settings.nvidia_api_key else [])
+    else:
+        wanted = [choice]
+    engines: list = []
+    for provider in wanted:
+        try:
+            if provider == "edge":
+                from jarvis.voice.tts_edge import DEFAULT_ONLINE_VOICE, EdgeSynthesizer
+
+                engines.append(EdgeSynthesizer(
+                    settings.tts_online_voice or DEFAULT_ONLINE_VOICE, settings.tts_rate, settings.tts_pitch,
+                ))
+            else:
+                from jarvis.voice.tts_nvidia import DEFAULT_VOICE as NV_VOICE, NvidiaSynthesizer
+
+                if not settings.nvidia_api_key:
+                    log.warning("JARVIS_TTS_PROVIDER=nvidia needs NVIDIA_API_KEY; skipping it")
+                    continue
+                voice = settings.tts_online_voice if choice == "nvidia" and settings.tts_online_voice else NV_VOICE
+                engines.append(NvidiaSynthesizer(settings.nvidia_api_key, voice))
+        except ImportError as exc:
+            log.warning("Online speech engine %s is not installed (%s)", provider, exc)
+    if not engines:
+        return piper
+    return FallbackSynthesizer([*engines, piper])

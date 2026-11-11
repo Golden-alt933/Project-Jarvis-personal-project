@@ -38,6 +38,10 @@ voice = [
     "faster-whisper>=1.1",
     "piper-tts>=1.3",
     "onnxruntime>=1.20",
+    # Online speech (free services; Piper and faster-whisper stay as the offline fallback).
+    "av>=14",  # decodes the streamed MP3 (also a faster-whisper dependency)
+    "edge-tts>=7.0",  # Microsoft Edge neural voices, unofficial client, no key
+    "nvidia-riva-client>=2.17",  # NVIDIA hosted Magpie TTS / Parakeet ASR over gRPC
 ]
 hud = ["PyQt6>=6.7", "qasync>=0.27"]
 # CUDA libraries for GPU speech recognition. Not part of `all`: large, NVIDIA-only.
