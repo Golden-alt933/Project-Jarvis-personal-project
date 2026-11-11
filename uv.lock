@@ -162,15 +162,6 @@ wheels = [
 ]
 
 [[package]]
-name = "comtypes"
-version = "1.5.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/21/cf/cd2f9e605c258d216ae48d86918ecff5bc652de338e090df3df4cd5d0d27/comtypes-1.5.0.tar.gz", hash = "sha256:831ddb867bc17bc89cac525b4f32132ebd4bef1ffe6432406ec9f5d858c1a122", size = 289180, upload-time = "2026-11-09T22:42:37.287Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/89/dc/818b43a6766800973e1611aeaff55e20cb38e36f3c499db1795838675f44/comtypes-1.5.0-py3-none-any.whl", hash = "sha256:c648ed3b243b1eb3b7cb893a873d1b35104ca1c8922061f4b1efafeb255bacb5", size = 325563, upload-time = "2026-11-09T22:42:35.97Z" },
-]
-
-[[package]]
 name = "cssselect2"
 version = "0.10.1"
 source = { registry = "https://pypi.org/simple" }
@@ -426,8 +417,31 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "faster-whisper" },
+    { name = "markdown" },
+    { name = "mss" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "openpyxl" },
+    { name = "pillow" },
+    { name = "piper-tts" },
+    { name = "pypdf" },
+    { name = "pyqt6" },
+    { name = "python-docx" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "qasync" },
+    { name = "rapidocr-onnxruntime" },
+    { name = "sounddevice" },
+    { name = "websockets" },
+    { name = "xhtml2pdf" },
+]
 browser = [
     { name = "websockets" },
+]
+gpu = [
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine == 'AMD64' and sys_platform == 'win32')" },
 ]
 hud = [
     { name = "pyqt6" },
@@ -438,6 +452,7 @@ office = [
     { name = "openpyxl" },
     { name = "pypdf" },
     { name = "python-docx" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "xhtml2pdf" },
 ]
 screen = [
@@ -448,17 +463,9 @@ screen = [
 voice = [
     { name = "faster-whisper" },
     { name = "numpy" },
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cudnn-cu12" },
     { name = "onnxruntime" },
     { name = "piper-tts" },
     { name = "sounddevice" },
-]
-windows = [
-    { name = "comtypes" },
-    { name = "pycaw" },
-    { name = "pygetwindow" },
-    { name = "pywinauto" },
 ]
 
 [package.dev-dependencies]
@@ -470,15 +477,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12" },
-    { name = "comtypes", marker = "extra == 'windows'", specifier = ">=1.4" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "jarvis", extras = ["office", "screen", "browser", "voice", "hud"], marker = "extra == 'all'" },
     { name = "markdown", marker = "extra == 'office'", specifier = ">=3.7" },
     { name = "mss", marker = "extra == 'screen'", specifier = ">=10.0" },
     { name = "numpy", marker = "extra == 'voice'", specifier = ">=2.1" },
-    { name = "nvidia-cublas-cu12", marker = "extra == 'voice'", specifier = ">=12.4,<12.9.3" },
-    { name = "nvidia-cudnn-cu12", marker = "extra == 'voice'", specifier = ">=9.1" },
+    { name = "nvidia-cublas-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'gpu') or (platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'gpu')", specifier = ">=12.4,<12.9.3" },
+    { name = "nvidia-cudnn-cu12", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'gpu') or (platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'gpu')", specifier = ">=9.1" },
     { name = "onnxruntime", marker = "extra == 'voice'", specifier = ">=1.20" },
     { name = "openai", specifier = ">=1.50" },
     { name = "openpyxl", marker = "extra == 'office'", specifier = ">=3.1" },
@@ -487,15 +494,13 @@ requires-dist = [
     { name = "platformdirs", specifier = ">=4.3" },
     { name = "prompt-toolkit", specifier = ">=3.0.48" },
     { name = "psutil", specifier = ">=6.1" },
-    { name = "pycaw", marker = "extra == 'windows'", specifier = ">=20240210" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pygetwindow", marker = "extra == 'windows'", specifier = ">=0.0.9" },
     { name = "pypdf", marker = "extra == 'office'", specifier = ">=5.0" },
     { name = "pyperclip", specifier = ">=1.9" },
     { name = "pyqt6", marker = "extra == 'hud'", specifier = ">=6.7" },
     { name = "python-docx", marker = "extra == 'office'", specifier = ">=1.2.0" },
-    { name = "pywinauto", marker = "extra == 'windows'", specifier = ">=0.6.8" },
+    { name = "pywin32", marker = "sys_platform == 'win32' and extra == 'office'", specifier = ">=306" },
     { name = "qasync", marker = "extra == 'hud'", specifier = ">=0.27" },
     { name = "rapidocr-onnxruntime", marker = "extra == 'screen'", specifier = ">=1.4" },
     { name = "rich", specifier = ">=13.9" },
@@ -504,7 +509,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'browser'", specifier = ">=15" },
     { name = "xhtml2pdf", marker = "extra == 'office'", specifier = ">=0.2.16" },
 ]
-provides-extras = ["office", "screen", "browser", "voice", "hud", "windows"]
+provides-extras = ["office", "screen", "browser", "voice", "hud", "gpu", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -629,7 +634,6 @@ dependencies = [
     { name = "nvidia-cuda-nvrtc-cu12" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/a2/c96163a0fff1839c0c9548bbdeae7b853b867009e33b9b9264adc238b1cf/nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:5572131a59c3eebeeb1c4c8144f772d49372c20124916e072a0e3fc30df421d5", size = 575012079, upload-time = "2026-04-08T18:51:47.303Z" },
     { url = "https://files.pythonhosted.org/packages/cb/c0/0a517bfe63ccd3b92eb254d264e28fca3c7cab75d07daea315250fb1bf73/nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702", size = 581240110, upload-time = "2026-04-08T18:52:31.532Z" },
     { url = "https://files.pythonhosted.org/packages/20/e2/fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl", hash = "sha256:623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661", size = 553162896, upload-time = "2026-04-08T18:53:10.035Z" },
 ]
@@ -640,7 +644,6 @@ version = "12.9.86"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/85/e4af82cc9202023862090bfca4ea827d533329e925c758f0cde964cb54b7/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4", size = 89568129, upload-time = "2025-06-05T20:02:41.973Z" },
-    { url = "https://files.pythonhosted.org/packages/64/eb/c2295044b8f3b3b08860e2f6a912b702fc92568a167259df5dddb78f325e/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:096d4de6bda726415dfaf3198d4f5c522b8e70139c97feef5cd2ca6d4cd9cead", size = 44528905, upload-time = "2025-06-05T20:02:29.754Z" },
     { url = "https://files.pythonhosted.org/packages/52/de/823919be3b9d0ccbf1f784035423c5f18f4267fb0123558d58b813c6ec86/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl", hash = "sha256:72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349", size = 76408187, upload-time = "2025-06-05T20:12:27.819Z" },
 ]
 
@@ -652,7 +655,6 @@ dependencies = [
     { name = "nvidia-cublas-cu12" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/a2/22732bccd338398ced3d02cdee97c351f0ff62f2717d677fce519479ee0c/nvidia_cudnn_cu12-9.28.1.4-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:ef24078b4d2f45e80b5ce425f9e4a190bc48806e8c9ea1467496f85ed9b0a1fe", size = 723285364, upload-time = "2026-11-09T07:59:55.695Z" },
     { url = "https://files.pythonhosted.org/packages/2a/16/be895437624ae0400bda2b4bb69336cdb43346545e54edb15389d193a3b3/nvidia_cudnn_cu12-9.28.1.4-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:cbcf6f33c77fef3aa61d3fec36f2e89b07eb27d65b9f369c1adf3cfee08c2c21", size = 716579350, upload-time = "2026-11-06T21:51:22.24Z" },
     { url = "https://files.pythonhosted.org/packages/c7/bd/1d6709d2223e99f04079f16005f8ae6e11a14ee16b5eab6833686cf72fe1/nvidia_cudnn_cu12-9.28.1.4-py3-none-win_amd64.whl", hash = "sha256:3467aafa9b260e6adf5fbbfc0e21d180133305b42032aa1160be2d3142bb8b09", size = 696300805, upload-time = "2026-11-06T21:54:48.887Z" },
 ]
@@ -871,19 +873,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pycaw"
-version = "20260927"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "comtypes" },
-    { name = "psutil" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/9e/51/2870619bf47cef359505d88d277b71c18ae5af18ffe94e707dbce6def6c2/pycaw-20260927.tar.gz", hash = "sha256:3a833ace1a76d0cee134366366d64c56ea9552ebc6f572580e4299ad552743f6", size = 29644, upload-time = "2026-09-26T20:05:02.191Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/79/baf93a0a0b53a886f6a84ac05dd8491068c8a7c54db4ccd247acdcff9d1c/pycaw-20260927-py3-none-any.whl", hash = "sha256:d5b162a87536956af8dfa0fc53b1c77870a30706445ffd7f92a2ed184f65ddf4", size = 28463, upload-time = "2026-09-26T20:05:00.817Z" },
-]
-
-[[package]]
 name = "pyclipper"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -966,15 +955,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pygetwindow"
-version = "0.0.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyrect" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/70/c7a4f46dbf06048c6d57d9489b8e0f9c4c3d36b7479f03c5ca97eaa2541d/PyGetWindow-0.0.9.tar.gz", hash = "sha256:17894355e7d2b305cd832d717708384017c1698a90ce24f6f7fbf0242dd0a688", size = 9699, upload-time = "2020-10-04T02:12:50.806Z" }
-
-[[package]]
 name = "pygments"
 version = "2.21.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1045,12 +1025,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyrect"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/cb/04/2ba023d5f771b645f7be0c281cdacdcd939fe13d1deb331fc5ed1a6b3a98/PyRect-0.2.0.tar.gz", hash = "sha256:f65155f6df9b929b67caffbd57c0947c5ae5449d3b580d178074bffb47a09b78", size = 17219, upload-time = "2022-03-16T04:45:52.36Z" }
-
-[[package]]
 name = "pytest"
 version = "9.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1101,18 +1075,6 @@ wheels = [
 ]
 
 [[package]]
-name = "python-xlib"
-version = "0.33"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/86/f5/8c0653e5bb54e0cbdfe27bf32d41f27bc4e12faa8742778c17f2a71be2c0/python-xlib-0.33.tar.gz", hash = "sha256:55af7906a2c75ce6cb280a584776080602444f75815a7aff4d287bb2d7018b32", size = 269068, upload-time = "2022-12-25T18:53:00.824Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", hash = "sha256:c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398", size = 182185, upload-time = "2022-12-25T18:52:58.662Z" },
-]
-
-[[package]]
 name = "pywin32"
 version = "312"
 source = { registry = "https://pypi.org/simple" }
@@ -1120,21 +1082,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2d/41/12fbfd7f36ed2146d8bc9de96c2741296bf0d490b98508496cff322e274c/pywin32-312-cp313-cp313-win32.whl", hash = "sha256:7a27df850933d16a8eabfbaeb73d52b273e2da667f80d70b01a89d1f6828d02c", size = 6370184, upload-time = "2026-06-04T07:49:36.253Z" },
     { url = "https://files.pythonhosted.org/packages/ba/db/36a78e3403099d31d9746d13fdcde5accc43c1155f375a34d15983a479a7/pywin32-312-cp313-cp313-win_amd64.whl", hash = "sha256:c53e878d15a1c44788082bfe712a905433473aa38f86375b7cf8b45e3acbaaf9", size = 6914298, upload-time = "2026-06-04T07:49:38.876Z" },
     { url = "https://files.pythonhosted.org/packages/84/37/c1697194092b76de9ed47ca124323f02c57ffc8a45c06f88a3d5acaf01eb/pywin32-312-cp313-cp313-win_arm64.whl", hash = "sha256:59aba5d5940842075343a5ddc6b11f1cdf0d1567fe745290359dfbcc7c2eb831", size = 6727640, upload-time = "2026-06-04T07:49:41.083Z" },
-]
-
-[[package]]
-name = "pywinauto"
-version = "0.6.9"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "comtypes", marker = "sys_platform == 'win32'" },
-    { name = "python-xlib", marker = "sys_platform == 'linux'" },
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2c/85/cc65e3b64e7473cc86c07f0b5c415d509402c03ef19dadc39c583835eb5f/pywinauto-0.6.9.tar.gz", hash = "sha256:94d710bfa796df245250f952ffa65d97233d9807bcd42e052b71b81af469b6de", size = 434734, upload-time = "2025-01-06T11:30:01.801Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/44/46/f2283648e0c237af451dc50ebc42121abfd198d12391fd9ad4df1c6b97d2/pywinauto-0.6.9-py2.py3-none-any.whl", hash = "sha256:5924b3072864a1d730c5546bbeb17cf4063ba518b618dbc5e43c18276c7c9356", size = 363041, upload-time = "2025-01-06T11:29:55.586Z" },
 ]
 
 [[package]]

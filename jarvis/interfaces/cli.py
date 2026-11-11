@@ -20,7 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from jarvis.agent.events import AgentEvent, Notice, TextChunk, ToolFinished, ToolStarted, TurnDone
-from jarvis.config import REPO_ROOT, Settings, get_settings
+from jarvis.config import Settings, config_files, get_settings, user_config_file
 from jarvis.interfaces.app import App, build_app
 from jarvis.llm.providers import ConfigError, describe
 from jarvis.llm.types import LLMClient, ToolCall
@@ -266,7 +266,7 @@ class SlashCommands:
     def _cloud(self, _: str) -> bool:
         if self.app.primary.is_local:
             self._say(
-                "The primary model is already the local one; set JARVIS_PROVIDER in .env to use a cloud model.",
+                "The primary model is already the local one; set JARVIS_PROVIDER (see `jarvis --config-path`) to use a cloud model.",
                 "yellow",
             )
             return False
@@ -334,8 +334,10 @@ async def local_warning(app: App) -> str | None:
 def config_error_message(message: str) -> str:
     return (
         f"{message}\n\n"
-        f"Edit {REPO_ROOT / '.env'} (copy .env.example to .env if it does not exist yet),\n"
-        "or run `jarvis --local` to use the Ollama model without any key."
+        "Run `jarvis --setup` to choose a provider and enter a key. It is saved to\n"
+        f"{user_config_file()}\n"
+        "(`jarvis --config-path` shows the file in use), or run `jarvis --local` to use\n"
+        "the Ollama model without any key."
     )
 
 
@@ -510,7 +512,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--devices", action="store_true", help="list audio devices and exit")
     p.add_argument("--browser-token", action="store_true", help="print the Chrome extension pairing token and folder, then exit")
     p.add_argument("--no-wake", action="store_true", help="voice: treat every utterance as addressed to Jarvis")
+    p.add_argument("--setup", action="store_true", help="first-run setup: choose a provider, store the API key, run the doctor")
+    p.add_argument("--doctor", action="store_true", help="check the installation and configuration, with a fix for each problem")
+    p.add_argument("--offline", action="store_true", help="with --doctor or --setup: do not contact the hosted model")
+    p.add_argument("--config-path", action="store_true", help="print the config file in use and exit")
+    p.add_argument("--version", action="store_true", help="print the version and exit")
     return p
+
+
+def package_version() -> str:
+    from importlib import metadata
+
+    try:
+        return metadata.version("jarvis")
+    except metadata.PackageNotFoundError:
+        return "unknown (not installed as a package)"
+
+
+def print_config_path() -> int:
+    """Print the highest-priority config file that exists (plain stdout, scriptable)."""
+    found = config_files()
+    if found:
+        print(found[0])
+        for other in found[1:]:
+            print(f"also read: {other} (lower priority)", file=sys.stderr)
+        return 0
+    print(user_config_file())
+    print("(no config file yet; `jarvis --setup` creates it)", file=sys.stderr)
+    return 0
 
 
 def _force_utf8() -> None:
@@ -608,9 +637,27 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--voice and --once cannot be combined")
     if (args.hud or args.hud_demo) and (args.voice or args.once is not None):
         parser.error("--hud cannot be combined with --voice or --once")
+    if args.version:
+        print(f"jarvis {package_version()}")
+        return 0
+    if args.config_path:
+        return print_config_path()
     if args.browser_token:
         return print_browser_token()
     console = Console()
+    if args.setup:
+        from jarvis.doctor import run_doctor
+        from jarvis.setup_wizard import run_setup
+
+        return run_setup(console, doctor=lambda settings: run_doctor(settings, console, offline=args.offline))
+    if args.doctor:
+        from jarvis.doctor import run_doctor
+
+        try:
+            return run_doctor(get_settings(), console, offline=args.offline)
+        except ValidationError as exc:
+            Console(stderr=True).print(Text(f"The configuration is not valid: {exc}", style="red"))
+            return 2
     if args.devices:
         return print_devices(console)
     try:

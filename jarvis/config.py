@@ -1,25 +1,69 @@
 """Settings. One object, loaded once, passed explicitly.
 
-Paths never depend on the current working directory: the data directory is
-``%LOCALAPPDATA%\\Jarvis`` unless JARVIS_DATA_DIR overrides it, so memory
-survives launching from any folder.
+Lookup order, first match wins: environment variables, then ``<repo>/.env`` when running
+from a checkout, then the per-user config file (``%APPDATA%\\Jarvis\\.env`` on Windows,
+``${XDG_CONFIG_HOME:-~/.config}/jarvis/.env`` on Linux; ``jarvis --setup`` writes it).
+
+Paths never depend on the current working directory: the data directory is the per-user
+data folder (``%LOCALAPPDATA%\\Jarvis``, ``~/.local/share/jarvis``) unless JARVIS_DATA_DIR
+overrides it, so memory survives launching from any folder.
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
-from platformdirs import user_data_dir
+from platformdirs import user_config_dir, user_data_dir
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from jarvis import platform as plat
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def app_dir_name() -> str:
+    return plat.current().app_dir_name
+
+
+def is_checkout() -> bool:
+    """True when running from a source checkout (as opposed to an installed wheel)."""
+    return (REPO_ROOT / "pyproject.toml").is_file()
+
+
+def repo_env_file() -> Path | None:
+    """``<repo>/.env`` when running from a checkout, else None."""
+    return REPO_ROOT / ".env" if is_checkout() else None
+
+
+def user_config_file() -> Path:
+    """The per-user config file. JARVIS_CONFIG_FILE overrides the location (used by tests)."""
+    override = os.environ.get("JARVIS_CONFIG_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path(user_config_dir(app_dir_name(), appauthor=False, roaming=True)) / ".env"
+
+
+def config_files() -> list[Path]:
+    """Config files in priority order (highest first); only those that exist."""
+    candidates = [repo_env_file(), user_config_file()]
+    return [p for p in candidates if p is not None and p.is_file()]
+
+
+def _env_file_chain() -> tuple[Path, ...]:
+    """pydantic-settings applies later files over earlier ones: user file, then repo .env."""
+    chain = [user_config_file()]
+    repo = repo_env_file()
+    if repo is not None:
+        chain.append(repo)
+    return tuple(chain)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(REPO_ROOT / ".env"),
+        env_file=_env_file_chain(),
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,
@@ -100,7 +144,7 @@ class Settings(BaseSettings):
         path = (
             Path(self.data_dir_override).expanduser()
             if self.data_dir_override
-            else Path(user_data_dir("Jarvis", appauthor=False))
+            else Path(user_data_dir(app_dir_name(), appauthor=False))
         )
         path.mkdir(parents=True, exist_ok=True)
         return path

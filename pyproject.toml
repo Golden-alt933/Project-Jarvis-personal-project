@@ -27,6 +27,8 @@ office = [
     "markdown>=3.7",
     "xhtml2pdf>=0.2.16",
     "python-docx>=1.2.0",
+    # The Excel COM recalculation path (Windows only; elsewhere LibreOffice is used if present).
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 screen = ["mss>=10.0", "pillow>=11.0", "rapidocr-onnxruntime>=1.4"]
 browser = ["websockets>=15"]
@@ -36,11 +38,15 @@ voice = [
     "faster-whisper>=1.1",
     "piper-tts>=1.3",
     "onnxruntime>=1.20",
-    "nvidia-cublas-cu12>=12.4,<12.9.3",
-    "nvidia-cudnn-cu12>=9.1",
 ]
 hud = ["PyQt6>=6.7", "qasync>=0.27"]
-windows = ["pycaw>=20240210", "comtypes>=1.4", "pywinauto>=0.6.8", "pygetwindow>=0.0.9"]
+# CUDA libraries for GPU speech recognition. Not part of `all`: large, NVIDIA-only.
+gpu = [
+    "nvidia-cublas-cu12>=12.4,<12.9.3; (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'linux' and platform_machine == 'x86_64')",
+    "nvidia-cudnn-cu12>=9.1; (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'linux' and platform_machine == 'x86_64')",
+]
+# Everything except the GPU libraries.
+all = ["jarvis[office,screen,browser,voice,hud]"]
 
 [project.scripts]
 jarvis = "jarvis.interfaces.cli:main"
@@ -54,6 +60,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["jarvis"]
+
+# The Chrome extension ships inside the wheel so an installed copy can offer it for
+# "Load unpacked" (jarvis/browser/bridge.py extension_dir() finds either location).
+[tool.hatch.build.targets.wheel.force-include]
+"extensions/jarvis-browser-control" = "jarvis/browser/extension"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

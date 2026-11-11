@@ -53,7 +53,11 @@ CLIENT_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{8,128}")
 # errorType values the extension may send; "uncertain_action" is also produced
 # here when the socket drops after a command was delivered.
 UNCERTAIN = "uncertain_action"
-EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extensions" / "jarvis-browser-control"
+# In a checkout the extension lives at <repo>/extensions/jarvis-browser-control. A built
+# wheel carries a copy at jarvis/browser/extension (see pyproject.toml, force-include).
+CHECKOUT_EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extensions" / "jarvis-browser-control"
+PACKAGED_EXTENSION_DIR = Path(__file__).resolve().parent / "extension"
+EXTENSION_DIR = CHECKOUT_EXTENSION_DIR
 
 
 class BridgeError(Exception):
@@ -108,7 +112,12 @@ def load_or_create_token(settings: "Settings") -> str:
 
 
 def extension_dir() -> Path:
-    return EXTENSION_DIR
+    """The unpacked extension folder to load in Chrome: the repository copy in a checkout,
+    the copy shipped inside the package for an installed wheel."""
+    for candidate in (CHECKOUT_EXTENSION_DIR, PACKAGED_EXTENSION_DIR):
+        if (candidate / "manifest.json").is_file():
+            return candidate
+    return CHECKOUT_EXTENSION_DIR
 
 
 @dataclass
