@@ -143,7 +143,9 @@ async def _hud_main(app: App, console: Console, voice: bool, demo: bool) -> int:
     from PyQt6.QtWidgets import QApplication
 
     from jarvis.hud.window import HudWindow
+    from jarvis.proactive.runtime import Background, start_background
     from jarvis.proactive.scheduler import ReminderWatcher
+    from jarvis.voice.events import VoiceState
 
     quit_event = asyncio.Event()
     holder: dict[str, Any] = {}
@@ -169,6 +171,7 @@ async def _hud_main(app: App, console: Console, voice: bool, demo: bool) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop())
 
     watcher: ReminderWatcher | None = None
+    background = Background(None, None)
     try:
         build = asyncio.ensure_future(_make_session(app, voice, demo, window.controller.handle, console))
         waiter = asyncio.ensure_future(quit_event.wait())
@@ -185,9 +188,15 @@ async def _hud_main(app: App, console: Console, voice: bool, demo: bool) -> int:
         if not demo:
             watcher = ReminderWatcher(app.store, session.say, session.is_idle)
             watcher.start()
+            background = start_background(
+                app, session.say, session.is_idle, spoken=bool(getattr(session, "has_audio", False)),
+                output_mode="voice" if getattr(session, "has_audio", False) else "text",
+                turn_active=lambda: getattr(session, "state", None) is VoiceState.THINKING, say_busy=session.say,
+            )
         await session.run(greeting=None if demo else GREETING)
         return 0
     finally:
+        await background.stop()
         if watcher is not None:
             await watcher.stop()
         window.close()

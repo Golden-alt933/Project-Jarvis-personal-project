@@ -251,6 +251,7 @@ class Agent:
             summary=turn.summary,
             output_mode=turn.output_mode,
             is_local=turn.client.is_local,
+            tool_groups=self._tool_groups(turn),
         )
         msgs = [Message("system", system), *turn.history]
         if extra is not None:
@@ -261,6 +262,11 @@ class Agent:
         if turn.client.is_local:
             return self.registry.schemas(self.settings.local_tool_groups)
         return self.registry.schemas()
+
+    def _tool_groups(self, turn: _Turn) -> set[str]:
+        """Groups of the tools offered this turn (the prompt adds guidance for some of them)."""
+        groups = self.settings.local_tool_groups if turn.client.is_local else None
+        return {s.group for s in self.registry.specs(groups)}
 
     def _persist(self, turn: _Turn, message: Message) -> None:
         turn.history.append(message)

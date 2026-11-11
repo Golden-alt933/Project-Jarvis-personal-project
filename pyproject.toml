@@ -17,6 +17,8 @@ dependencies = [
     "ddgs>=9.0",
     "send2trash>=1.8",
     "pyperclip>=1.9",
+    # Time-zone rules for scheduled tasks and calendar events; Windows has no system copy.
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

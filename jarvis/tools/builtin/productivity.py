@@ -276,8 +276,10 @@ _WHEN_HELP = (
 def set_reminder(message: str, when: str, ctx: ToolContext) -> ToolResult:
     """Schedule a reminder that Jarvis will deliver at a future time.
 
-    Use for "remind me to ... in/at/tomorrow ...". If the user gave no usable
-    time, ask them rather than guessing. Returns the reminder number and the
+    Use for "remind me to ... in/at/tomorrow ...": Jarvis only TELLS the user the
+    message at that time. When the user wants something DONE at a time (check, look
+    up, summarise, open, run), or a repeating action, use schedule_task instead.
+    If the user gave no usable time, ask them rather than guessing. Returns the reminder number and the
     exact time it was set for; repeat that time back to the user.
 
     Args:
