@@ -40,7 +40,7 @@ VK: dict[str, int] = {
     "bracketleft": 0xDB, "bracketright": 0xDD, "backslash": 0xDC,
 }
 VK.update({chr(c): c for c in range(ord("0"), ord("9") + 1)})
-VK.update({chr(c): c for c in range(ord("a"), ord("z") + 1)})
+VK.update({chr(c).lower(): c for c in range(ord("A"), ord("Z") + 1)})  # letter VKs are the upper-case ASCII codes
 VK.update({f"f{n}": 0x6F + n for n in range(1, 25)})
 _EXTENDED = {"insert", "delete", "home", "end", "pageup", "pagedown", "up", "down", "left", "right", "win", "printscreen"}
 # "plus" is shift+equals on a US keyboard; the VK for '=' alone types '+' only with shift held

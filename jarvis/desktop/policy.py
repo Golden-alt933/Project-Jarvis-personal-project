@@ -160,8 +160,21 @@ def element_dict(element: UiElement) -> dict[str, object]:
     return shaped
 
 
+# Desktop-only additions to the browser classifier: actions on the machine itself.
+_MACHINE_DANGER = re.compile(
+    r"\b(empty (?:the )?(?:recycle bin|trash)|uninstall|format|shut ?down|restart|reboot|"
+    r"sign ?out|log ?off|factory reset|overwrite|run as administrator)\b"
+)
+
+
 def classify_element_click(element: UiElement) -> Verdict:
-    return classify_click(element_dict(element))
+    verdict = classify_click(element_dict(element))
+    if verdict.safe:
+        words = re.sub(r"[_\-./:]+", " ", f"{element.name} {element.automation_id}".lower())
+        found = _MACHINE_DANGER.search(words)
+        if found:
+            return Verdict("ask", f"a system or data-loss action ('{found.group(0)}')")
+    return verdict
 
 
 def classify_element_typing(element: UiElement | None, text: str) -> Verdict:

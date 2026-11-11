@@ -64,7 +64,7 @@ _WS = re.compile(r"\s+")
 
 def clean(text: Any, limit: int = 120) -> str:
     value = _WS.sub(" ", str(text or "")).strip()
-    return value if len(value) <= limit else value[: limit - 1] + "..."
+    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 @dataclass
