@@ -10,6 +10,7 @@ import asyncio
 import difflib
 import importlib
 import inspect
+import typing
 import logging
 import pkgutil
 from typing import Any, Iterable
@@ -20,6 +21,41 @@ from jarvis.llm.types import ToolCall
 from jarvis.tools.base import Risk, ToolContext, ToolResult, ToolSpec
 
 log = logging.getLogger(__name__)
+
+
+_PLACEHOLDERS = frozenset({"none", "null", "undefined"})  # not "n/a": people search for that
+
+
+def _literal_values(annotation: Any) -> set[Any]:
+    found: set[Any] = set()
+    if typing.get_origin(annotation) is typing.Literal:
+        found.update(typing.get_args(annotation))
+    for inner in typing.get_args(annotation):
+        if inner is not annotation and typing.get_origin(annotation) is not typing.Literal:
+            found |= _literal_values(inner)
+    return found
+
+
+def _without_placeholders(spec: ToolSpec, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Drop optional arguments a model filled with "none" or null instead of leaving out.
+
+    Smaller models do this constantly (filter="none", wait_for="null"), and taken literally
+    it searches a page for the word "none". An optional argument left out means its default,
+    so that is what a placeholder becomes. Required arguments and values a parameter really
+    accepts (a Literal that lists "none") are left alone.
+    """
+    fields = spec.args_model.model_fields
+    cleaned: dict[str, Any] = {}
+    for name, value in arguments.items():
+        field = fields.get(name)
+        if field is not None and not field.is_required():
+            if value is None:
+                continue
+            if (isinstance(value, str) and value.strip().lower() in _PLACEHOLDERS
+                    and value not in _literal_values(field.annotation)):
+                continue
+        cleaned[name] = value
+    return cleaned
 
 
 class ToolRegistry:
@@ -91,7 +127,7 @@ class ToolRegistry:
             return ToolResult.fail(f"unknown tool '{call.name}'", hint)
 
         try:
-            parsed = spec.args_model.model_validate(call.arguments or {})
+            parsed = spec.args_model.model_validate(_without_placeholders(spec, call.arguments or {}))
         except ValidationError as exc:
             problems = "; ".join(
                 f"{'.'.join(str(p) for p in e['loc']) or 'arguments'}: {e['msg']}"

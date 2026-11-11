@@ -206,8 +206,17 @@ One turn:
    tools so the model reports what was and was not done), cancellation, or error.
 
 Failure handling:
-- `LLMUnavailable` from the primary before any text was emitted in that step: emit a
-  `Notice`, switch to the fallback for the rest of the turn.
+- `LLMUnavailable` before any text was emitted in that step, or a reply with no text and no
+  tool call: continue the turn on the next client, hosted alternates first
+  (`providers.build_alternates`), the local fallback last (with a `Notice`). The client that
+  failed is benched for `BENCH_SECONDS` so later turns start on the one that works. The
+  OpenAI-compatible client raises `LLMUnavailable` itself when a stream stalls between chunks
+  or produces only reasoning for three times the first-byte timeout.
+- With no other client left, an empty reply is nudged once, then answered with an apology.
+- A confirmation the user refused is not asked again in the same turn (`_AskOnce`), and after
+  three refusals nothing more is asked that turn.
+- Optional tool arguments filled with "none", "null" or JSON null are dropped before
+  validation, so they take their defaults (`registry._without_placeholders`).
 - `LLMBadRequest`: compact history harder and retry the step once.
 - The same call (name + arguments) a third time in one turn is not executed; the
   model gets a failed result telling it the result will not change.
@@ -253,6 +262,10 @@ sentence. The model turns "every morning at nine, brief me" into a `schedule_tas
   `say` path as reminders, only when the user is idle.
 - **Errands** (`tools/builtin/errands.py`, group `errands`). Pure URL and .ics builders plus thin
   tools that open the result in the JARVIS Chrome tab group when the extension is connected, else in
-  the default browser or app. They prefill and never send or save. Multi-step website work uses the
+  the default browser or app. They prefill and never send or save. `find_flights`, `find_hotels` and
+  `find_trains` resolve the date in code (`productivity.parse_day`), put it in a search link, and
+  return the page text read through the extension, trimmed to the results; `open_map` returns the
+  places or the route the same way. The model never has to do date arithmetic or guess what a page
+  shows. Multi-step website work uses the
   browser tools, steered by the "working on websites" prompt section, which is added only when the
   browser tool group is offered to the model (`build_system_prompt(tool_groups=...)`).

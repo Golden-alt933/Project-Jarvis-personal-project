@@ -47,7 +47,7 @@ def test_websites_section_only_with_browser_tools(tmp_path: Path):
 
 def test_websites_section_is_a_sensible_length_and_covers_the_rules():
     words = len(_WEBSITES.split())
-    assert 120 <= words <= 175, words
+    assert 120 <= words <= 200, words
     for needle in ("browser_status", "not connected", "Inspect", "again after every page change", "comparison",
                    "ask for anything missing", "payment", "stop", "irreversible", "read back", "truthfully"):
         assert needle.lower() in _WEBSITES.lower(), needle

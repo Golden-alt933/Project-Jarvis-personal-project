@@ -885,3 +885,13 @@ def test_service_worker_contract_tests_pass_under_node() -> None:
     assert files
     done = subprocess.run(["node", "--test", *files], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_a_search_forms_button_is_safe_even_when_its_id_says_submit():
+    from jarvis.browser.policy import classify_click
+
+    go = {"tag": "input", "type": "submit", "label": "Go", "id": "nav-search-submit-button"}
+    assert classify_click(go).safe
+    assert not classify_click({"tag": "button", "type": "submit", "label": "Submit", "id": "f1"}).safe
+    pay = {"tag": "button", "type": "submit", "label": "Search and buy now", "id": "search-submit"}
+    assert not classify_click(pay).safe  # other danger words still count

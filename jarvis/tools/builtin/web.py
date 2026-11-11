@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import time
 import re
 import socket
 from typing import Any, Literal
@@ -55,6 +56,30 @@ def _ddgs_text(query: str, max_results: int, timelimit: str | None) -> list[dict
     return list(DDGS().text(query, max_results=max_results, timelimit=timelimit))
 
 
+_AD_LINK = re.compile(r"^https?://(?:www\.)?(?:bing\.com/aclick|duckduckgo\.com/y\.js|googleadservices\.com/)", re.I)
+
+
+def _is_ad(url: str) -> bool:
+    """Sponsored results arrive as tracking redirects, not as the page they advertise."""
+    return bool(_AD_LINK.match(url))
+
+
+def _search_with_retry(query: str, n: int, timelimit: str | None) -> list[dict[str, Any]]:
+    """The search backend now and then answers "No results found" to a good query, then works
+    a second later. One quiet retry; a second empty answer is a real "no results"."""
+    for attempt in (1, 2):
+        try:
+            return _ddgs_text(query, n + 2, timelimit)[: n + 2]
+        except RatelimitException:
+            raise
+        except Exception as exc:
+            if "no results" not in str(exc).lower():
+                raise
+            if attempt == 1:
+                time.sleep(1.0)
+    return []
+
+
 @tool(group="web", timeout=30)
 def web_search(
     query: str,
@@ -76,7 +101,7 @@ def web_search(
         return ToolResult.fail("empty search query")
     n = max(1, min(max_results, 10))
     try:
-        raw = _ddgs_text(query.strip(), n, _TIMELIMIT[recency])
+        raw = _search_with_retry(query.strip(), n, _TIMELIMIT[recency])
     except RatelimitException:
         return ToolResult.fail(
             "the search service is rate limiting requests",
@@ -93,10 +118,11 @@ def web_search(
          "snippet": (r.get("body") or "").strip()}
         for r in raw
     ]
-    results = [r for r in results if r["url"]]
+    results = [r for r in results if r["url"] and not _is_ad(r["url"])]
     if not results:
         hint = "Try broader terms" + (", or recency='any'." if recency != "any" else ".")
         return ToolResult.fail(f"no results for '{query}'", hint)
+    results = results[:n]
     text = "\n\n".join(
         f"{i}. {r['title']}\n   {r['url']}\n   {r['snippet']}" for i, r in enumerate(results, 1)
     )

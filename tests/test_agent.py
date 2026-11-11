@@ -668,3 +668,105 @@ async def test_the_voice_model_falls_back_to_the_main_hosted_model(store):
     agent.primary = voice  # what App.use_voice_model() does
     events = await run(agent)
     assert done(events).model == "big-model"
+
+
+async def test_empty_reply_switches_to_the_other_hosted_model_without_a_nudge(store):
+    primary = ScriptedLLM([""], name="big")
+    alternate = ScriptedLLM(["From the other hosted model."], name="small")
+    local = ScriptedLLM(["Local here."], name="local", is_local=True)
+    agent = make_agent(store, primary, fallback=local, alternates=[primary, alternate])
+    events = await run(agent)
+    assert done(events).text == "From the other hosted model." and done(events).model == "small-model"
+    assert all("empty" not in m.content for m in alternate.calls[0][0])  # no nudge was needed
+    assert not any(isinstance(e, Notice) for e in events) and local.calls == []
+
+
+async def test_empty_reply_mid_task_hands_the_transcript_to_the_other_hosted_model(store):
+    primary = ScriptedLLM([calls(("echo", {"text": "a"})), ""], name="big")
+    alternate = ScriptedLLM(["Finished."], name="small")
+    agent = make_agent(store, primary, alternates=[primary, alternate])
+    d = done(await run(agent))
+    assert d.text == "Finished." and d.tool_calls == 1
+    assert any(m.role == "tool" for m in alternate.calls[0][0])  # it saw the tool result
+
+
+async def test_empty_from_every_hosted_model_nudges_then_uses_the_local_model(store):
+    primary = ScriptedLLM([""], name="big")
+    alternate = ScriptedLLM(["", ""], name="small")
+    local = ScriptedLLM(["Local here."], name="local", is_local=True)
+    agent = make_agent(store, primary, fallback=local, alternates=[primary, alternate])
+    events = await run(agent)
+    assert done(events).text == "Local here."
+    assert "empty" in alternate.calls[1][0][-1].content  # the nudge came before the local model
+    assert sum(isinstance(e, Notice) for e in events) == 1
+
+
+async def test_a_model_that_just_failed_does_not_lead_the_next_turns(store, monkeypatch):
+    primary = ScriptedLLM([LLMUnavailable("down"), "Back again."], name="big")
+    alternate = ScriptedLLM(["One.", "Two."], name="small")
+    agent = make_agent(store, primary, alternates=[primary, alternate])
+    assert done(await run(agent)).model == "small-model"
+    assert done(await run(agent)).model == "small-model"  # straight to the working model
+    assert len(primary.calls) == 1
+    agent._benched["big-model"] = 0.0  # the bench has expired
+    assert done(await run(agent)).text == "Back again."
+
+
+async def test_an_empty_reply_also_benches_the_model(store):
+    primary = ScriptedLLM([""], name="big")
+    alternate = ScriptedLLM(["One.", "Two."], name="small")
+    agent = make_agent(store, primary, alternates=[primary, alternate])
+    await run(agent)
+    assert done(await run(agent)).model == "small-model" and len(primary.calls) == 1
+
+
+async def test_when_every_hosted_model_is_benched_the_chosen_one_still_leads(store):
+    primary = ScriptedLLM(["Still me."], name="big")
+    alternate = ScriptedLLM([], name="small")
+    agent = make_agent(store, primary, alternates=[primary, alternate])
+    agent._bench(primary)
+    agent._bench(alternate)
+    assert done(await run(agent)).model == "big-model"
+
+
+async def test_a_declined_action_is_not_put_to_the_user_again(store):
+    asked: list[str] = []
+
+    async def no(description: str) -> bool:
+        asked.append(description)
+        return False
+
+    again = calls(("danger", {"target":"a"}))
+    llm = ScriptedLLM([again, again, calls(("danger", {"target":"b"})), "Not done."])
+    events = await run(make_agent(store, llm), confirm=no)
+    results = [e.result for e in events if isinstance(e, ToolFinished)]
+    assert len(asked) == 2  # once per distinct action, not once per attempt
+    assert all(not r.ok and "declined" in r.content for r in results)
+    assert done(events).text == "Not done."
+
+
+async def test_after_three_refusals_nothing_more_is_asked_this_turn(store):
+    asked: list[str] = []
+
+    async def no(description: str) -> bool:
+        asked.append(description)
+        return False
+
+    steps = [calls(("danger", {"target":p})) for p in "abcde"]
+    events = await run(make_agent(store, ScriptedLLM([*steps, "Stopped."])), confirm=no)
+    assert len(asked) == 3
+    assert sum(isinstance(e, ToolFinished) and not e.result.ok for e in events) == 5
+    asked.clear()  # a new turn starts with a clean slate
+    agent = make_agent(store, ScriptedLLM([calls(("danger", {"target":"a"})), "ok"]))
+    await run(agent, confirm=no)
+    assert len(asked) == 1
+
+
+async def test_a_model_stuck_repeating_a_call_is_stopped_and_made_to_report(store):
+    same = calls(("echo", {"text": "x"}))
+    llm = ScriptedLLM([same] * 5 + ["I could not get past that step."])
+    events = await run(make_agent(store, llm))
+    d = done(events)
+    assert d.text == "I could not get past that step." and d.stopped == "max_steps"
+    assert len(llm.calls) == 6 and llm.calls[-1][1] is None  # the last call offered no tools
+    assert "repeated calls" in llm.calls[-1][0][-1].content

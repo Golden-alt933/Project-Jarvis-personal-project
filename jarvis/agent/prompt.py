@@ -6,7 +6,7 @@ import getpass
 import logging
 import os
 import platform
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
@@ -40,9 +40,13 @@ def _time_section(now: datetime | None) -> str:
     moment = (now or datetime.now()).astimezone()
     offset = moment.strftime("%z")
     offset = f"UTC{offset[:3]}:{offset[3:]}" if offset else "UTC"
+    days = [moment + timedelta(days=n) for n in range(1, 15)]
+    coming = ", ".join(f"{d:%a} {d.day} {d:%b}" for d in days)
     return (
         f"It is {moment:%A %d %B %Y}, {moment:%H:%M}, local time "
-        f"({moment.tzname() or 'local'}, {offset})."
+        f"({moment.tzname() or 'local'}, {offset}). The coming days: {coming}. Read dates off "
+        "this list instead of calculating them, and give tools a date in the user's own words "
+        "('next Friday') or as YYYY-MM-DD."
     )
 
 
@@ -66,7 +70,9 @@ def _identity(settings: "Settings") -> str:
         "Chain as many tool calls as the task needs and check the results as you go. When a "
         "tool fails, read the error and try a different approach before giving up. Never say "
         "an action succeeded unless a tool result shows it did, and say plainly when "
-        "something was not done or only partly done. Ask a short question only when you are "
+        "something was not done or only partly done. Every price, time, distance, rating and "
+        "name you report must appear in a tool result from this conversation: if you do not "
+        "have a figure, fetch it or say you do not have it, never estimate it. Ask a short question only when you are "
         "genuinely blocked on a choice that belongs to the user."
     )
 
@@ -126,7 +132,8 @@ _WEBSITES = (
     "Working on websites. You drive the user's own Chrome with the browser tools. Call "
     "browser_status first; if Chrome is not connected, tell the user what to do (the result "
     "explains) and stop. Inspect a page before acting and again after every page change, "
-    "because element numbers go stale. For searches and bookings, gather the options (price, "
+    "because element numbers go stale. For flights, hotels and trains start with find_flights, "
+    "find_hotels or find_trains: they run the dated search and return live results. For searches and bookings, gather the options (price, "
     "time, availability) and give a short comparison before choosing, unless the user already "
     "chose. Fill forms from what the user said or from memory, and ask for anything missing "
     "instead of inventing it. The user signs in and enters payment details themselves: when a "

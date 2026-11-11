@@ -528,6 +528,34 @@ async def test_first_byte_timeout_stalled_stream_is_closed_and_retried():
     assert events[-1].response.content == "ok"
 
 
+async def test_a_stream_that_stalls_mid_reply_ends_as_unavailable():
+    async def create(n, req):
+        return FakeStream([chunk("Hel"), 5, chunk("lo", finish="stop")])
+
+    client, calls = make_client(create, first_byte_timeout=0.05)
+    with pytest.raises(LLMUnavailable, match="mid-reply"):
+        await collect(client)
+    assert len(calls) == 1  # text was already shown: no silent retry
+
+
+async def test_endless_reasoning_without_a_reply_ends_as_unavailable():
+    async def create(n, req):
+        return FakeStream([chunk(None, reasoning_content="hm"), 0.05] * 40 + [chunk("late", finish="stop")])
+
+    client, _ = make_client(create, first_byte_timeout=0.2)
+    with pytest.raises(LLMUnavailable, match="no reply within"):
+        await collect(client)
+
+
+async def test_a_slow_but_steady_reply_is_not_cut_off():
+    async def create(n, req):
+        return FakeStream([chunk("a"), 0.1, chunk("b"), 0.1, chunk("c"), 0.1, chunk("d"), 0.1, chunk("e", finish="stop")])
+
+    client, _ = make_client(create, first_byte_timeout=0.3)
+    events = await collect(client)
+    assert events[-1].response.content == "abcde"
+
+
 async def test_first_byte_timeout_twice_raises_unavailable():
     async def create(n, req):
         await asyncio.sleep(5)
@@ -552,11 +580,11 @@ async def test_no_retry_once_output_has_begun():
     assert len(calls) == 1 and [e.text for e in seen] == ["partial"]
 
 
-async def test_timeout_only_covers_the_first_chunk():
+async def test_a_pause_shorter_than_the_timeout_mid_reply_is_fine():
     async def create(n, r):
-        return FakeStream([chunk("a"), 0.15, chunk("b", finish="stop")])
+        return FakeStream([chunk("a"), 0.1, chunk("b", finish="stop")])
 
-    client, calls = make_client(create, first_byte_timeout=0.1)
+    client, calls = make_client(create, first_byte_timeout=0.4)
     events = await collect(client)
     assert len(calls) == 1 and events[-1].response.content == "ab"
 

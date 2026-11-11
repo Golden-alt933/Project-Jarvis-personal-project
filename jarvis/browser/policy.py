@@ -174,6 +174,9 @@ def _texts(element: dict[str, Any]) -> str:
     return " | ".join(seen)
 
 
+_SUBMIT_WORD = re.compile(r"\bsubmit\b")
+
+
 def _is_link(element: dict[str, Any]) -> bool:
     return element.get("tag") == "a" and element.get("role", "") in ("", "link")
 
@@ -195,6 +198,10 @@ def classify_click(element: dict[str, Any]) -> Verdict:
         return _ask("choosing a file to upload")
     text = _texts(element)
     stripped = _SAFE_PHRASES.sub(" ", text)
+    if "search" in stripped:
+        # A search form's own button is often named like "nav-search-submit-button". Running a
+        # search sends nothing; every other danger word on it still counts.
+        stripped = _SUBMIT_WORD.sub(" ", stripped)
     for reason, pattern in _DANGER:
         if pattern.search(stripped):
             return _ask(reason)

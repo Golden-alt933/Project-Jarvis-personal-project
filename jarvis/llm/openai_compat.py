@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any, AsyncIterator
 
@@ -121,6 +122,10 @@ class ChunkAssembler:
         self._finish: str | None = None
         self._usage: Usage | None = None
         self.reasoning_chars = 0
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self._calls)
 
     def feed(self, chunk: Any) -> list[str]:
         """Consume one chunk; return visible text deltas (possibly empty)."""
@@ -283,7 +288,11 @@ class OpenAICompatClient:
         reasoning_effort); `extra_params` are SDK keyword arguments (top_p, ...).
         `first_byte_timeout` (seconds, 0 = off): a streaming request that has produced no
         data by then is abandoned and retried once. `streaming=False` makes stream() do one
-        plain request and emit the content as a single delta."""
+        plain request and emit the content as a single delta.
+
+        The same timeout bounds the rest of the stream: a gap that long between chunks, or
+        three times that long with reasoning but no reply text and no tool call, ends the
+        request as unavailable so the caller can move to another model."""
         self.name = name
         self.model = model
         self.context_window = context_window
@@ -351,14 +360,40 @@ class OpenAICompatClient:
                     await response.close()
             raise _FirstByteTimeout from None
 
+    async def _next_chunk(self, iterator: Any, started: float, spoke: bool) -> Any:
+        """The next chunk, or LLMUnavailable when the stream has stalled or only thinks."""
+        limit = self._first_byte_timeout
+        if limit <= 0:
+            return await anext(iterator, _END)
+        if not spoke and time.monotonic() - started > 3 * limit:
+            await self._abandon(iterator)
+            raise LLMUnavailable(f"{self.model} produced no reply within {3 * limit:g}s.")
+        try:
+            return await asyncio.wait_for(anext(iterator, _END), limit)
+        except asyncio.TimeoutError:
+            await self._abandon(iterator)
+            raise LLMUnavailable(f"{self.model} stopped sending mid-reply for {limit:g}s.") from None
+
+    @staticmethod
+    async def _abandon(iterator: Any) -> None:
+        for name in ("aclose", "close"):
+            closer = getattr(iterator, name, None)
+            if closer is not None:
+                with contextlib.suppress(Exception):
+                    await closer()
+                return
+
     async def _stream_once(self, req: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         assembler = ChunkAssembler(self.model)
         try:
             iterator, chunk = await self._first_chunk(req)
+            started, spoke = time.monotonic(), False
             while chunk is not _END:
                 for text in assembler.feed(chunk):
+                    spoke = True
                     yield TextDelta(text)
-                chunk = await anext(iterator, _END)
+                spoke = spoke or assembler.has_tool_calls
+                chunk = await self._next_chunk(iterator, started, spoke)
         except openai.OpenAIError as exc:
             raise map_openai_error(exc, self._api_key) from None
         tail, final = assembler.finish()

@@ -40,6 +40,12 @@ log = logging.getLogger(__name__)
 
 MAX_IDENTICAL_CALLS = 3  # the third identical call in a turn is not executed
 RECALL_LIMIT = 8
+# A hosted model that just failed (unreachable, rate limited, or an empty reply) is not
+# the first choice for new turns for this long: on the free tier a model that is down
+# stays down for minutes, and every retry costs the user seconds.
+BENCH_SECONDS = 300.0
+MAX_BLOCKED_CALLS = 3  # refused repeats in one turn before the turn is wrapped up
+MAX_REFUSALS = 3  # after this many refusals in one turn, stop asking and let the model report
 CANCELLED_TEXT = "Error: cancelled by the user before this call finished."
 EMPTY_NUDGE = "(Your last reply was empty. Reply to the user, or call a tool if you need one.)"
 WRAPUP_NOTE = (
@@ -48,6 +54,27 @@ WRAPUP_NOTE = (
 )
 EMPTY_APOLOGY = "I'm sorry, I didn't manage to produce a reply to that. Could you try asking again?"
 _END = object()
+
+
+class _AskOnce:
+    """The turn's confirm callback: the same question is never put to the user twice, and
+    after MAX_REFUSALS refusals nothing more is asked this turn (every answer is then no).
+
+    A model that is told "the user declined" sometimes simply calls the tool again; without
+    this the user is asked the identical question until the repeat guard steps in.
+    """
+
+    def __init__(self, ask: Callable[[str], Awaitable[bool]]) -> None:
+        self._ask = ask
+        self._refused: set[str] = set()
+
+    async def __call__(self, description: str) -> bool:
+        if description in self._refused or len(self._refused) >= MAX_REFUSALS:
+            return False
+        approved = bool(await self._ask(description))
+        if not approved:
+            self._refused.add(description)
+        return approved
 
 
 class _Cancelled(Exception):
@@ -68,6 +95,7 @@ class _Turn:
     usage: Usage | None = None
     call_counts: dict[str, int] = field(default_factory=dict)
     tried: list[str] = field(default_factory=list)  # models that failed this turn
+    blocked: int = 0  # calls refused as exact repeats
 
     def add_usage(self, usage: Usage | None) -> None:
         if usage is None:
@@ -101,6 +129,7 @@ class Agent:
         self.settings = settings
         self.context = ContextManager(store, settings, self.fast)
         self._force_local = False
+        self._benched: dict[str, float] = {}  # model -> monotonic time it may lead again
         self._cancel = asyncio.Event()
         self._cancel_waiter: asyncio.Future[Any] | None = None
         self.conversation_id: str = store.start_conversation()
@@ -144,7 +173,24 @@ class Agent:
             local = self._local_client()
             if local is not None:
                 return local
+        if self._is_benched(self.primary):
+            for alt in self.alternates:
+                if alt.model != self.primary.model and not self._is_benched(alt):
+                    return alt
         return self.primary
+
+    def _bench(self, client: LLMClient) -> None:
+        if not client.is_local:
+            self._benched[client.model] = time.monotonic() + BENCH_SECONDS
+
+    def _is_benched(self, client: LLMClient) -> bool:
+        until = self._benched.get(client.model)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            del self._benched[client.model]
+            return False
+        return True
 
     # -- the turn -------------------------------------------------------------
     def run_turn(
@@ -216,7 +262,7 @@ class Agent:
     ) -> _Turn:
         ctx_kwargs: dict[str, Any] = {}
         if confirm is not None:
-            ctx_kwargs["confirm"] = confirm
+            ctx_kwargs["confirm"] = _AskOnce(confirm)
         if notify is not None:
             ctx_kwargs["notify"] = notify
         ctx = ToolContext(
@@ -301,6 +347,15 @@ class Agent:
 
             if not response.tool_calls:
                 if not response.content.strip():
+                    # An empty reply is a failed model as far as the user is concerned. Another
+                    # hosted model is the first remedy; the nudge and the local model come after.
+                    successor = self._next_client(turn, hosted_only=not nudged)
+                    if successor is not None:
+                        notice = self._switch(turn, successor, "returned an empty reply")
+                        if notice is not None:
+                            yield notice
+                        nudged = False
+                        continue
                     if not nudged:
                         nudged = True
                         continue
@@ -324,6 +379,8 @@ class Agent:
     def _limit_reached(self, turn: _Turn) -> str | None:
         if turn.steps >= self.settings.max_steps:
             return "max_steps"
+        if turn.blocked >= MAX_BLOCKED_CALLS:
+            return "repeated_calls"  # the model is going round in circles: stop and report
         if time.monotonic() - turn.started > self.settings.turn_time_budget:
             return "time_budget"
         return None
@@ -352,7 +409,7 @@ class Agent:
             yield TextChunk(text)
         # Tool calls requested during wrap-up are dropped, so the transcript stays valid.
         self._persist(turn, Message("assistant", text))
-        yield self._finish(turn, text, reason)
+        yield self._finish(turn, text, "max_steps" if reason == "repeated_calls" else reason)
 
     # -- model call with failure handling -----------------------------------
     async def _model_call(
@@ -381,24 +438,35 @@ class Agent:
                 await self.context.compact(self.conversation_id, aggressive=True)
                 turn.history, turn.summary = await self.context.build(self.conversation_id)
             except LLMUnavailable as exc:
+                self._bench(turn.client)
                 successor = None if emitted else self._next_client(turn)
                 if successor is None:
                     raise
-                log.warning("%s unavailable (%s); switching to %s", turn.client.model, exc, successor.model)
-                turn.tried.append(turn.client.model)
-                turn.client = successor
-                if successor.is_local:  # worth telling the user: slower, fewer tools
-                    yield Notice(
-                        f"{self.primary.name} is unreachable; continuing on the local model "
-                        f"({successor.model}) with a reduced toolset."
-                    )
+                notice = self._switch(turn, successor, f"unavailable ({exc})")
+                if notice is not None:
+                    yield notice
 
-    def _next_client(self, turn: _Turn) -> LLMClient | None:
+    def _switch(self, turn: _Turn, successor: LLMClient, why: str) -> Notice | None:
+        """Continue the turn on `successor`. Returns a notice when that is worth telling."""
+        log.warning("%s %s; switching to %s", turn.client.model, why, successor.model)
+        self._bench(turn.client)
+        turn.tried.append(turn.client.model)
+        turn.client = successor
+        if not successor.is_local:
+            return None  # hosted to hosted: same tools, same speed, not news
+        return Notice(
+            f"{self.primary.name} is unreachable; continuing on the local model "
+            f"({successor.model}) with a reduced toolset."
+        )
+
+    def _next_client(self, turn: _Turn, *, hosted_only: bool = False) -> LLMClient | None:
         """The next model to try this turn: hosted alternates first, the local one last."""
         for candidate in (*self.alternates, self.fallback):
             if candidate is None or candidate is turn.client:
                 continue
             if candidate.model == turn.client.model or candidate.model in turn.tried:
+                continue
+            if hosted_only and candidate.is_local:
                 continue
             return candidate
         return None
@@ -464,7 +532,10 @@ class Agent:
     def _blocked(self, turn: _Turn, call: ToolCall) -> bool:
         key = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
         turn.call_counts[key] = turn.call_counts.get(key, 0) + 1
-        return turn.call_counts[key] >= MAX_IDENTICAL_CALLS
+        if turn.call_counts[key] < MAX_IDENTICAL_CALLS:
+            return False
+        turn.blocked += 1
+        return True
 
     def _is_safe(self, call: ToolCall) -> bool:
         spec = self.registry.get(call.name)

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from jarvis.tools.base import Risk, ToolContext, ToolResult, tool
@@ -84,6 +84,25 @@ _TONIGHT_RE = re.compile(r"\b(tonight|this evening)\b", re.I)
 _NOON_RE = re.compile(r"\b(noon|midday|midnight)\b", re.I)
 _WEEKDAY_RE = re.compile(r"\b(?:next\s+|on\s+)?(" + "|".join(_WEEKDAYS) + r")\b", re.I)
 
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4,
+    "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9,
+    "sept": 9, "sep": 9, "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_MONTH = "(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + ")"
+_ORD = r"(?:st|nd|rd|th)?"
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_DMY_RE = re.compile(rf"\b(\d{{1,2}}){_ORD}\s+(?:of\s+)?{_MONTH}\b\.?(?:,?\s+(\d{{4}})\b)?", re.I)
+_MDY_RE = re.compile(rf"\b{_MONTH}\b\.?\s+(\d{{1,2}}){_ORD}\b(?!:)(?:,?\s+(\d{{4}})\b)?", re.I)
+# Day first, as written in India and the UK. Dots only with a full year, so "9.30" stays a time.
+_SLASH_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}|\d{2}))?\b|\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
+_DAY_AFTER_RE = re.compile(r"\b(?:the\s+)?day\s+after\s+tomorrow\b", re.I)
+_YESTERDAY_RE = re.compile(r"\b(yesterday|last\s+(?:night|week|month|year))\b", re.I)
+_WEEKEND_RE = re.compile(r"\b(?:(this|the|next|coming)\s+)?weekend\b", re.I)
+_NEXT_WEEK_RE = re.compile(r"\bnext\s+week\b", re.I)
+_PART_RE = re.compile(r"\b(morning|afternoon|evening|night)\b", re.I)
+_PART_HOUR = {"morning": 9, "afternoon": 15, "evening": 19, "night": 20}
+
 MAX_OFFSET = timedelta(days=365)
 DEFAULT_MORNING_HOUR = 9
 DEFAULT_EVENING_HOUR = 20
@@ -114,6 +133,80 @@ def _find_clock(text: str) -> tuple[int, int] | None:
             hour = 0
         return hour, minute
     return None
+
+
+def _calendar_date(day: int, month: int, year: int | None, today: date, shown: str) -> date:
+    try:
+        if year is None:  # "13 nov": this year, or next year once it has passed
+            found = date(today.year, month, day)
+            return found if found >= today else date(today.year + 1, month, day)
+        return date(year + 2000 if year < 100 else year, month, day)
+    except ValueError:
+        raise WhenError(f"'{shown.strip()}' is not a real date") from None
+
+
+def _find_day(raw: str, today: date) -> tuple[date, str] | None:
+    """The calendar day named in raw and the words that named it, or None.
+
+    Understands ISO dates, "13 nov [2026]", "November 13th", "13/11/2026" (day first),
+    "day after tomorrow", "tomorrow", "today", "this weekend", "next week" and weekday names.
+    A weekday means its next occurrence (never today). Raises WhenError for the past.
+    """
+    if m := _ISO_DATE_RE.search(raw):
+        return _calendar_date(int(m.group(3)), int(m.group(2)), int(m.group(1)), today, m.group(0)), m.group(0)
+    if m := _DMY_RE.search(raw):
+        year = int(m.group(3)) if m.group(3) else None
+        return _calendar_date(int(m.group(1)), _MONTHS[m.group(2).lower()], year, today, m.group(0)), m.group(0)
+    if m := _MDY_RE.search(raw):
+        year = int(m.group(3)) if m.group(3) else None
+        return _calendar_date(int(m.group(2)), _MONTHS[m.group(1).lower()], year, today, m.group(0)), m.group(0)
+    if m := _SLASH_RE.search(raw):
+        d, mo, y = (m.group(1), m.group(2), m.group(3)) if m.group(1) else (m.group(4), m.group(5), m.group(6))
+        day, month = int(d), int(mo)
+        if month > 12 >= day:  # written month first after all
+            day, month = month, day
+        return _calendar_date(day, month, int(y) if y else None, today, m.group(0)), m.group(0)
+    if m := _YESTERDAY_RE.search(raw):
+        raise WhenError(f"'{m.group(0)}' is in the past")
+    if m := _DAY_AFTER_RE.search(raw):
+        return today + timedelta(days=2), m.group(0)
+    if m := _TOMORROW_RE.search(raw):
+        return today + timedelta(days=1), m.group(0)
+    if m := _TODAY_RE.search(raw):
+        return today, m.group(0)
+    if m := _WEEKEND_RE.search(raw):
+        ahead = (5 - today.weekday()) % 7  # the coming Saturday; today when it is Saturday
+        if today.weekday() == 6:
+            ahead = 0  # on a Sunday the weekend is now
+        if (m.group(1) or "").lower() == "next" and today.weekday() >= 5:
+            ahead = (5 - today.weekday()) % 7 or 7
+        return today + timedelta(days=ahead), m.group(0)
+    if m := _NEXT_WEEK_RE.search(raw):
+        return today + timedelta(days=7), m.group(0)
+    if m := _WEEKDAY_RE.search(raw):
+        ahead = (_WEEKDAYS.index(m.group(1).lower()) - today.weekday()) % 7 or 7
+        return today + timedelta(days=ahead), m.group(0)
+    return None
+
+
+def parse_day(text: str, now: datetime) -> date:
+    """The calendar day named in text: "next friday", "13 nov", "2026-11-13", "in 3 days",
+    "today", "this weekend". Raises WhenError (never guesses) for the unknown or the past."""
+    raw = (text or "").strip()
+    if not raw:
+        raise WhenError("no date given")
+    now = now.replace(tzinfo=None, microsecond=0)
+    found = _find_day(raw, now.date())
+    if found is not None:
+        if found[0] < now.date():
+            raise WhenError(f"{found[0].isoformat()} is in the past")
+        return found[0]
+    if _TONIGHT_RE.search(raw):
+        return now.date()
+    try:
+        return parse_when(raw, now).date()  # "in 3 days", a full ISO timestamp
+    except WhenError:
+        raise WhenError(f"could not understand the date '{raw}'") from None
 
 
 def parse_when(text: str, now: datetime) -> datetime:
@@ -151,20 +244,17 @@ def parse_when(text: str, now: datetime) -> datetime:
             raise WhenError("that is more than a year away")
         return now + delta
 
-    clock = _find_clock(raw)
-    if clock is None and (n := _NOON_RE.search(raw)):
+    found = _find_day(raw, now.date())
+    rest = raw.replace(found[1], " ", 1) if found else raw  # the date's digits are not a clock time
+    clock = _find_clock(rest)
+    if clock is None and (n := _NOON_RE.search(rest)):
         clock = (0, 0) if n.group(1).lower() == "midnight" else (12, 0)
-    day_named = False
-    base = now
-    if _TOMORROW_RE.search(raw):
-        base, day_named = now + timedelta(days=1), True
-    elif _TODAY_RE.search(raw):
-        day_named = True
-    elif w := _WEEKDAY_RE.search(raw):
-        ahead = (_WEEKDAYS.index(w.group(1).lower()) - now.weekday()) % 7 or 7
-        base, day_named = now + timedelta(days=ahead), True
-    elif _TONIGHT_RE.search(raw):
+    day_named = found is not None
+    base = datetime.combine(found[0], now.time()) if found else now
+    if not day_named and _TONIGHT_RE.search(raw):
         clock = clock or (DEFAULT_EVENING_HOUR, 0)
+    if clock is None and (part := _PART_RE.search(rest)):
+        clock = (_PART_HOUR[part.group(1).lower()], 0)  # "saturday night", "tomorrow morning"
     if clock is None:
         if not day_named or _TODAY_RE.search(raw):
             raise WhenError(f"could not understand the time '{raw}'")

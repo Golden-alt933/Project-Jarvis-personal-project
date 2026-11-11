@@ -88,7 +88,11 @@ _HINTS = {
     "not_found": "Call browser_inspect to see what is on the page.",
     "no_tab": "Use browser_open to open a page in the JARVIS tab group first.",
     "not_in_group": "Use browser_tabs(action='list') to see the tabs Jarvis may use.",
-    "covered": "Something is on top of it (a popup or banner). Inspect the page and deal with that first.",
+    "covered": (
+        "A popup, dialog or banner is on top of it, and clicking other controls will fail the same "
+        "way. Call browser_inspect(filter='close') (or 'dismiss', 'accept', 'got it') to find the "
+        "popup's own button, click that, then inspect again."
+    ),
     "disabled": "Inspect the page: the control may need something filled in first.",
     "refused": "The user must enter this themselves. Tell them, and do not try another way to fill it.",
     "timeout": "Read the page to see its current state.",

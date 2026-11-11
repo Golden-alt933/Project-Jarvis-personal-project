@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 import sqlite3
 import subprocess
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -236,7 +236,7 @@ def test_web_search_formats_results(ddgs):
     ]
     r = web.web_search("python 3.13", max_results=3, recency="week")
     assert r.ok and "https://python.org/3.13" in r.content and "dropped" not in r.content
-    assert ddgs.last["timelimit"] == "w" and ddgs.last["max_results"] == 3
+    assert ddgs.last["timelimit"] == "w" and ddgs.last["max_results"] == 5  # two spare for dropped ads
     assert r.data[0]["title"] == "Python 3.13"
 
 
@@ -378,6 +378,60 @@ def test_parse_when_valid(text, expected):
 def test_parse_when_invalid(text):
     with pytest.raises(prod.WhenError):
         prod.parse_when(text, NOW)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("day after tomorrow", datetime(2026, 11, 12, 9, 0)),
+        ("the day after tomorrow at 4pm", datetime(2026, 11, 12, 16, 0)),
+        ("13 nov", datetime(2026, 11, 13, 9, 0)),
+        ("13th of November 2026 at 6pm", datetime(2026, 11, 13, 18, 0)),
+        ("Nov 13, 2026 8:15am", datetime(2026, 11, 13, 8, 15)),
+        ("December 1st", datetime(2026, 12, 1, 9, 0)),
+        ("5 jan", datetime(2027, 1, 5, 9, 0)),  # already passed this year
+        ("13/11/2026 3pm", datetime(2026, 11, 13, 15, 0)),  # day first
+        ("2026-11-13 8pm", datetime(2026, 11, 13, 20, 0)),
+        ("saturday night", datetime(2026, 11, 14, 20, 0)),
+        ("tomorrow afternoon", datetime(2026, 11, 11, 15, 0)),
+        ("this weekend", datetime(2026, 11, 14, 9, 0)),
+        ("next week", datetime(2026, 11, 17, 9, 0)),
+    ],
+)
+def test_parse_when_understands_dates(text, expected):
+    assert prod.parse_when(text, NOW) == expected
+
+
+@pytest.mark.parametrize("text", ["yesterday 9am", "last week", "31 feb", "5 nov 2026", "32/01/2027"])
+def test_parse_when_refuses_the_past_and_the_impossible(text):
+    with pytest.raises(prod.WhenError):
+        prod.parse_when(text, NOW)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("today", (2026, 11, 10)), ("tonight", (2026, 11, 10)), ("tomorrow", (2026, 11, 11)),
+        ("next friday", (2026, 11, 13)), ("this Saturday night", (2026, 11, 14)),
+        ("13 nov", (2026, 11, 13)), ("2026-12-24", (2026, 12, 24)), ("in 3 days", (2026, 11, 13)),
+        ("the weekend", (2026, 11, 14)), ("day after tomorrow", (2026, 11, 12)),
+    ],
+)
+def test_parse_day(text, expected):
+    assert prod.parse_day(text, NOW) == date(*expected)
+
+
+@pytest.mark.parametrize("text", ["", "whenever", "yesterday", "2026-11-09", "sometime"])
+def test_parse_day_refuses(text):
+    with pytest.raises(prod.WhenError):
+        prod.parse_day(text, NOW)
+
+
+def test_weekend_on_a_weekend_day():
+    saturday, sunday = datetime(2026, 11, 14, 10, 0), datetime(2026, 11, 15, 10, 0)
+    assert prod.parse_day("this weekend", saturday) == date(2026, 11, 14)
+    assert prod.parse_day("this weekend", sunday) == date(2026, 11, 15)
+    assert prod.parse_day("next weekend", saturday) == date(2026, 11, 21)
 
 
 def test_parse_when_midnight_edge():
@@ -754,3 +808,31 @@ def test_system_status_real(monkeypatch):
     assert r.ok
     for label in ("CPU:", "RAM:", "Battery:", "Disks:", "Top memory:", "Uptime:", "Network:"):
         assert label in r.content
+
+
+def test_web_search_drops_sponsored_redirects_and_keeps_the_count(ddgs):
+    ddgs.results = [
+        {"title": "Ad", "href": "https://www.bing.com/aclick?ld=abc&u=xyz", "body": "sponsored"},
+        {"title": "Ad two", "href": "https://duckduckgo.com/y.js?ad_domain=x", "body": "sponsored"},
+        *({"title": f"Real {i}", "href": f"https://example.com/{i}", "body": "text"} for i in range(4)),
+    ]
+    r = web.web_search("flights delhi mumbai", max_results=3)
+    assert r.ok and "aclick" not in r.content and "y.js" not in r.content
+    assert [x["title"] for x in r.data] == ["Real 0", "Real 1", "Real 2"]
+
+
+def test_web_search_retries_a_spurious_no_results_once(ddgs, monkeypatch):
+    monkeypatch.setattr(web.time, "sleep", lambda s: None)
+    answers = [web.DDGSException("No results found."), [{"title": "T", "href": "https://example.com", "body": "b"}]]
+
+    def flaky(query, n, timelimit):
+        item = answers.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(web, "_ddgs_text", flaky)
+    assert web.web_search("something").ok and answers == []
+    answers[:] = [web.DDGSException("No results found."), web.DDGSException("No results found.")]
+    r = web.web_search("nothing at all")
+    assert not r.ok and "no results for" in r.content and "internet" not in r.content

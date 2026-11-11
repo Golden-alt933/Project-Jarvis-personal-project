@@ -264,7 +264,7 @@ Everything heavy runs on free hosted services by default, so the laptop mostly c
 | Speech synthesis | Microsoft Edge neural voice `en-GB-RyanNeural` | hosted |
 | Voice-activity detection, screen OCR | Silero VAD, RapidOCR | local |
 
-When a hosted model does not answer (the free tier sometimes stalls), Jarvis first retries, then switches to the other hosted model, and only if both fail falls back to the local Ollama model, which is slower, offers fewer tools and loads about 2.5 GB onto the machine. Speech falls back per sentence to the local engines (Piper, faster-whisper). Set `JARVIS_LOCAL_FALLBACK=false` to never load a local model, or `jarvis --local` to use only local ones. An explicit `JARVIS_MODEL` is always respected: Jarvis then never switches to a different hosted model on its own.
+When a hosted model does not answer, stalls part-way through a reply, or answers with nothing at all (all three happen on the free tier), Jarvis switches to the other hosted model within the same turn and keeps the failed one off the front of the queue for five minutes, so the following turns do not pay for it again. Only if both hosted models fail does it fall back to the local Ollama model, which is slower, offers fewer tools and loads about 2.5 GB onto the machine. Speech falls back per sentence to the local engines (Piper, faster-whisper). Set `JARVIS_LOCAL_FALLBACK=false` to never load a local model, or `jarvis --local` to use only local ones. An explicit `JARVIS_MODEL` is always respected: Jarvis then never switches to a different hosted model on its own.
 
 ## Voice mode
 
@@ -351,8 +351,13 @@ The errand tools open a **prefilled page for you to review**. They never send, s
 |---|---|---|
 | "Email Sam that I will be late" | `draft_email` | Gmail or Outlook compose in your signed-in Chrome, or your mail app (`mailto:`) |
 | "Put Design review on my calendar tomorrow at 3" | `create_calendar_event` | A new-event page in Google or Outlook calendar, or an `.ics` file saved to Documents and opened in your calendar app. The time is echoed in words so you can check it |
-| "Directions from India Gate to Connaught Place" | `open_map` | Google Maps search or directions |
+| "Directions from India Gate to Connaught Place" | `open_map` | Google Maps search or directions; with Chrome connected Jarvis reads back the places and ratings, or the route's time and distance |
+| "Flights from Delhi to Mumbai next Friday" | `find_flights` | Google Flights for that exact date; Jarvis reads the live list (airline, times, price) |
+| "A hotel in Jaipur this Saturday under 5000" | `find_hotels` | Booking.com for those dates, best reviewed first, with a link to each property's page |
+| "Trains from Delhi to Jaipur tomorrow morning" | `find_trains` | A timetable for that date |
 | "WhatsApp Priya that I am on my way" | `compose_message` | A `wa.me` link (number with country code), an `sms:` link, or Telegram's share page; you press send |
+
+Dates can be said the way you would say them: "next Friday", "this weekend", "13 Nov", "the day after tomorrow", "13/11/2026" (day first). The tool works out the date and says it back in full ("Friday 13 November 2026"), so a wrong guess is visible before anything else happens. The travel searches only search: to go further Jarvis opens the property or fare you pick and carries on with the browser tools, stopping before the reserve or pay button. They need Chrome connected to read the results; without it the page just opens in your browser.
 
 `JARVIS_MAIL_PROVIDER` and `JARVIS_CALENDAR_PROVIDER` choose the service; `auto` means Google when Chrome is connected, else `mailto:` or an `.ics` file. If the page wants you to sign in, Jarvis says so and waits.
 

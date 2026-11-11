@@ -325,6 +325,14 @@ class Chrome:
         self.opened.append(url)
         return "in the JARVIS tab group of Chrome (tab_id=7)"
 
+    page_text = "Ask Maps\nResults\nCaffè Tonino 4.3 (5,725)\nSorrento 4.5 (909)"
+
+    async def read(self, ctx, url: str, wait_for, link_filter=None) -> dict:
+        if self.fail:
+            raise RuntimeError("extension disconnected")
+        self.opened.append(url)
+        return {"tabId": 7, "url": url, "title": "Google Maps", "text": self.page_text, "links": []}
+
 
 @pytest.fixture
 def rig(tmp_path: Path, fake_platform, monkeypatch):
@@ -332,6 +340,7 @@ def rig(tmp_path: Path, fake_platform, monkeypatch):
         chrome = Chrome(connected, fail)
         monkeypatch.setattr(errands, "chrome_connected", chrome.is_connected)
         monkeypatch.setattr(errands, "open_in_chrome", chrome.open)
+        monkeypatch.setattr(errands, "read_in_chrome", chrome.read)
         ctx = ToolContext(settings=Settings(data_dir_override=str(tmp_path), **settings))
         return chrome, ctx
 
@@ -429,7 +438,7 @@ async def test_open_map_search_and_directions(rig):
     res = await errands.open_map(ctx, query="Italian restaurant near Connaught Place")
     assert res.ok and qs(chrome.opened[0])["query"] == "Italian restaurant near Connaught Place"
     res = await errands.open_map(ctx, origin="India Gate", destination="Café Étoile", mode="walking")
-    assert "directions to Café Étoile by walking" in res.content
+    assert "directions from India Gate to Café Étoile by walking" in res.content
     assert qs(chrome.opened[1])["travelmode"] == "walking"
     assert not (await errands.open_map(ctx)).ok
     _, ctx2 = build(False)
@@ -459,9 +468,153 @@ async def test_os_refusal_is_a_clean_failure(rig):
 
 def test_errand_tools_are_registered_in_their_own_group_and_never_in_the_local_menu():
     registry = ToolRegistry().load_builtin()
-    names = {"draft_email", "create_calendar_event", "open_map", "compose_message"}
+    names = {"draft_email", "create_calendar_event", "open_map", "compose_message",
+             "find_flights", "find_hotels", "find_trains"}
     assert {s.name for s in registry.specs(["errands"])} == names
     assert "errands" not in Settings().local_tool_groups
     for name in names:
         assert registry.get(name).risk.value == "safe"  # they only prefill; nothing leaves the machine
     assert registry.get("draft_email").parameters["properties"]["provider"]["enum"] == ["auto", "gmail", "outlook", "mailto"]
+
+
+# -- travel searches -----------------------------------------------------------------------------------------------------------
+def test_travel_links_carry_the_exact_dates():
+    from datetime import date
+
+    out = date(2026, 11, 13)
+    one_way = qs(errands.flights_url("Delhi", "Mumbai", out, None, 1))
+    assert one_way["q"] == "Flights from Delhi to Mumbai on 2026-11-13 one way"
+    back = qs(errands.flights_url("Delhi", "Mumbai", out, date(2026, 11, 16), 2))
+    assert back["q"] == "Flights from Delhi to Mumbai on 2026-11-13 returning 2026-11-16 for 2 adults"
+    stay = qs(errands.hotels_url("Jaipur & around", date(2026, 11, 14), date(2026, 11, 15), 2, 1, "rating"))
+    assert stay == {"ss": "Jaipur & around", "checkin": "2026-11-14", "checkout": "2026-11-15",
+                    "group_adults": "2", "no_rooms": "1", "order": "bayesian_review_score"}
+    assert qs(errands.trains_url("Delhi", "Jaipur", date(2026, 11, 5)))["q"] == "trains from Delhi to Jaipur on 5 November 2026"
+
+
+def test_trim_results_drops_the_filters_and_caps_the_length():
+    page = "Skip to main content\nFilters   Pool  12\n\nJaipur: 1,314 properties found\nHome of the world  9.8\n" + "x" * 9000
+    text = errands.trim_results(page, "properties found", limit=200)
+    assert text.startswith("Jaipur: 1,314 properties found\nHome of the world 9.8")
+    assert "Filters" not in text and "more results on the page" in text and len(text) < 300
+    assert errands.trim_results("no marker here", "properties found") == "no marker here"
+
+
+class Reader:
+    def __init__(self, text: str = "53 results returned.\n8:45 AM IndiGo Nonstop ₹6,301", fail: bool = False) -> None:
+        self.text, self.fail, self.calls = text, fail, []
+
+    links: list = []
+
+    async def __call__(self, ctx, url: str, wait_for, link_filter=None):
+        self.calls.append((url, wait_for))
+        if self.fail:
+            raise RuntimeError("tab closed")
+        return {"tabId": 7, "url": url, "title": "Results", "text": "Skip to main content\n" + self.text,
+                "links": self.links if link_filter else []}
+
+
+async def test_find_flights_resolves_the_day_and_returns_the_results(rig, monkeypatch):
+    build, plat, _ = rig
+    _, ctx = build(True)
+    reader = Reader()
+    monkeypatch.setattr(errands, "read_in_chrome", reader)
+    res = await errands.find_flights("Delhi", "Mumbai", "next friday", ctx)  # the rig's today is Tue 10 Nov 2026
+    assert res.ok and "Friday 13 November 2026, one way" in res.content
+    assert qs(reader.calls[0][0])["q"] == "Flights from Delhi to Mumbai on 2026-11-13 one way"
+    assert "IndiGo Nonstop ₹6,301" in res.content and "Skip to main content" not in res.content
+    assert "<page_content" in res.content and res.data["read"] is True and res.data["tabId"] == 7
+    res = await errands.find_flights("Delhi", "Mumbai", "13 nov", ctx, return_date="16 nov", adults=2)
+    assert "returning Monday 16 November 2026" in res.content
+
+
+async def test_find_flights_refuses_bad_input(rig, monkeypatch):
+    build, _, _ = rig
+    _, ctx = build(True)
+    monkeypatch.setattr(errands, "read_in_chrome", Reader())
+    for args, kw in ((("Delhi", "Mumbai", "whenever"), {}), (("", "Mumbai", "tomorrow"), {}),
+                     (("Delhi", "Mumbai", "yesterday"), {}), (("Delhi", "Mumbai", "15 nov"), {"return_date": "13 nov"}),
+                     (("Delhi", "Mumbai", "tomorrow"), {"adults": 0})):
+        res = await errands.find_flights(*args, ctx, **kw)
+        assert not res.ok, args
+
+
+async def test_find_hotels_and_trains(rig, monkeypatch):
+    build, _, _ = rig
+    _, ctx = build(True)
+    reader = Reader("Jaipur: 1,314 properties found\nHome of the world Scored 9.8 ₹ 4,400")
+    monkeypatch.setattr(errands, "read_in_chrome", reader)
+    res = await errands.find_hotels("Jaipur", "this saturday", ctx, nights=2, sort="price")
+    q = qs(reader.calls[0][0])
+    assert res.ok and (q["checkin"], q["checkout"], q["order"]) == ("2026-11-14", "2026-11-16", "price")
+    assert "Saturday 14 November 2026 for 2 night(s)" in res.content and "Scored 9.8" in res.content
+    assert not (await errands.find_hotels("Jaipur", "tomorrow", ctx, nights=0)).ok
+    res = await errands.find_trains("Delhi", "Jaipur", "tomorrow", ctx)
+    assert res.ok and "Wednesday 11 November 2026" in res.content
+    assert qs(reader.calls[-1][0])["q"] == "trains from Delhi to Jaipur on 11 November 2026"
+
+
+async def test_travel_search_without_chrome_opens_the_default_browser_and_says_so(rig, monkeypatch):
+    build, plat, _ = rig
+    _, ctx = build(False)
+    res = await errands.find_flights("Delhi", "Mumbai", "tomorrow", ctx)
+    assert res.ok and plat.urls[-1].startswith("https://www.google.com/travel/flights?")
+    assert "could not be read" in res.content and res.data["read"] is False
+    _, ctx = build(True)
+    monkeypatch.setattr(errands, "read_in_chrome", Reader(fail=True))
+    res = await errands.find_hotels("Jaipur", "tomorrow", ctx)
+    assert res.ok and "tab closed" in res.content and plat.urls[-1].startswith("https://www.booking.com/")
+
+
+def test_property_links_are_one_clean_dated_address_per_property():
+    items = [
+        {"label": "", "href": "https://www.booking.com/hotel/in/pathik-niwas.en-gb.html?label=gen173&sid=abc#hotelTmpl"},
+        {"label": "Pathik Niwas  Opens in new window", "href": "https://www.booking.com/hotel/in/pathik-niwas.en-gb.html?label=gen173&sid=abc"},
+        {"label": "See availability", "href": "https://www.booking.com/hotel/in/pathik-niwas.en-gb.html?label=gen173"},
+        {"label": "Cocoon Auberge Opens in new window", "href": "https://www.booking.com/hotel/in/cocoon.html?x=1"},
+        {"label": "Sign in", "href": "https://account.booking.com/sign-in"},
+    ]
+    keep = {"checkin": "2026-11-14", "checkout": "2026-11-15", "group_adults": "2", "no_rooms": "1"}
+    assert errands.property_links(items, "/hotel/", keep) == [
+        "- Pathik Niwas: https://www.booking.com/hotel/in/pathik-niwas.en-gb.html?checkin=2026-11-14&checkout=2026-11-15&group_adults=2&no_rooms=1",
+        "- Cocoon Auberge: https://www.booking.com/hotel/in/cocoon.html?checkin=2026-11-14&checkout=2026-11-15&group_adults=2&no_rooms=1",
+    ]
+    assert len(errands.property_links(items, "/hotel/", keep, most=1)) == 1
+
+
+async def test_find_hotels_lists_a_page_for_each_property(rig, monkeypatch):
+    build, _, _ = rig
+    _, ctx = build(True)
+    reader = Reader("Jaipur: 2 properties found\nPathik Niwas Scored 9.6 ₹ 2,570")
+    reader.links = [{"label": "Pathik Niwas Opens in new window", "href": "https://www.booking.com/hotel/in/pathik-niwas.html?sid=1"}]
+    monkeypatch.setattr(errands, "read_in_chrome", reader)
+    res = await errands.find_hotels("Jaipur", "this saturday", ctx)
+    assert "- Pathik Niwas: https://www.booking.com/hotel/in/pathik-niwas.html?checkin=2026-11-14&checkout=2026-11-15" in res.content
+    res = await errands.find_flights("Delhi", "Mumbai", "tomorrow", ctx)
+    assert "Page of each property" not in res.content
+
+
+async def test_calendar_event_length_in_minutes(rig):
+    build, _, _ = rig
+    chrome, ctx = build(True)
+    res = await errands.create_calendar_event("Design review", "tomorrow 3pm", ctx, minutes=30)
+    assert res.ok and "15:00 to 15:30" in res.content
+    res = await errands.create_calendar_event("Design review", "tomorrow 3pm", ctx, end="5pm", minutes=30)
+    assert "15:00 to 17:00" in res.content  # an explicit end wins
+    assert not (await errands.create_calendar_event("x", "tomorrow 3pm", ctx, minutes=0)).ok
+
+
+async def test_open_map_returns_what_the_map_shows(rig):
+    build, plat, _ = rig
+    chrome, ctx = build(True)
+    res = await errands.open_map(ctx, query="Italian restaurant near Connaught Place")
+    assert "Sorrento 4.5 (909)" in res.content and "Ask Maps" not in res.content  # trimmed to the results
+    chrome.page_text = "Best\n12 min\n3.4 km\nvia Kasturba Gandhi Marg"
+    res = await errands.open_map(ctx, origin="India Gate", destination="Sorrento, Ashoka Road")
+    assert "directions from India Gate to Sorrento, Ashoka Road by driving" in res.content
+    assert "12 min" in res.content and "3.4 km" in res.content
+    res = await errands.open_map(ctx, destination="India Gate")
+    assert "from the user's current location to India Gate" in res.content
+    chrome.fail = True  # Chrome drops out: the default browser still gets the link, and nothing is described
+    res = await errands.open_map(ctx, query="coffee")
+    assert res.ok and plat.urls and "could not be read" in res.content
