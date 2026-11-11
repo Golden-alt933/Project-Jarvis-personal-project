@@ -29,6 +29,8 @@ from jarvis.platform.base import (
     AppEntry,
     BasePlatform,
     PlatformUnsupported,
+    UiSnapshot,
+    WindowInfo,
     WindowRow,
     run_quiet,
 )
@@ -94,7 +96,7 @@ class Helper:
 HELPERS: dict[str, Helper] = {
     "xdg-open": Helper("open files and links", "xdg-utils", "xdg-utils", "xdg-utils", "xdg-utils"),
     "wmctrl": Helper("list and close windows (X11)", "wmctrl", "wmctrl", "wmctrl", "wmctrl"),
-    "xdotool": Helper("foreground window and cursor (X11)", "xdotool", "xdotool", "xdotool", "xdotool"),
+    "xdotool": Helper("foreground window, cursor and desktop input (X11)", "xdotool", "xdotool", "xdotool", "xdotool"),
     "wpctl": Helper("volume (PipeWire)", "wireplumber", "wireplumber", "wireplumber", "wireplumber"),
     "pactl": Helper("volume (PulseAudio)", "pulseaudio-utils", "pulseaudio-utils", "libpulse", "pulseaudio-utils"),
     "amixer": Helper("volume (ALSA)", "alsa-utils", "alsa-utils", "alsa-utils", "alsa-utils"),
@@ -364,6 +366,19 @@ class _Amixer:
         _run_ok(["amixer", "-q", "sset", "Master", "mute" if muted else "unmute"])
 
 
+
+# canonical key names (jarvis.platform.keys) -> xdotool key names
+_XDO_KEYS = {
+    "ctrl": "ctrl", "alt": "alt", "shift": "shift", "win": "super",
+    "enter": "Return", "tab": "Tab", "space": "space", "escape": "Escape",
+    "backspace": "BackSpace", "delete": "Delete", "insert": "Insert", "home": "Home",
+    "end": "End", "pageup": "Prior", "pagedown": "Next", "up": "Up", "down": "Down",
+    "left": "Left", "right": "Right", "capslock": "Caps_Lock", "printscreen": "Print",
+    "plus": "plus", "minus": "minus", "equals": "equal", "comma": "comma", "period": "period",
+    "slash": "slash", "semicolon": "semicolon", "quote": "apostrophe", "backquote": "grave",
+    "bracketleft": "bracketleft", "bracketright": "bracketright", "backslash": "backslash",
+}
+
 _MEDIA_PLAYERCTL = {"play_pause": "play-pause", "next": "next", "previous": "previous", "stop": "stop"}
 
 
@@ -620,6 +635,124 @@ class LinuxPlatform(BasePlatform):
             return None
         x, y = re.search(r"^X=(-?\d+)", out, re.M), re.search(r"^Y=(-?\d+)", out, re.M)
         return (int(x.group(1)), int(y.group(1))) if x and y else None
+
+    # -- camera -----------------------------------------------------------
+    def camera_backends(self) -> list[str]:
+        return ["v4l2"]
+
+    def camera_access_problem(self) -> str | None:
+        devices = sorted(Path("/dev").glob("video[0-9]*"))
+        if devices and not any(os.access(d, os.R_OK | os.W_OK) for d in devices):
+            return (
+                f"you have no permission to use {devices[0]}. Add your user to the 'video' group "
+                "(sudo usermod -aG video $USER), then log out and in again"
+            )
+        return None
+
+    def camera_devices(self) -> list[str] | None:
+        devices = sorted(str(d) for d in Path("/dev").glob("video[0-9]*"))
+        return devices
+
+    # -- desktop control (input through xdotool on X11; no element listing yet) ------
+    def desktop_problem(self) -> str | None:
+        session = session_type()
+        if session == "wayland":
+            return (
+                "desktop input is not supported in a Wayland session (xdotool only works on X11); "
+                "log in with an X11 session. ydotool could be supported in a future version"
+            )
+        if session == "headless":
+            return "desktop control needs a graphical session; DISPLAY is not set"
+        if shutil.which("xdotool") is None:
+            return str(need("xdotool", "desktop control needs xdotool"))
+        return None
+
+    def _require_input(self, what: str) -> None:
+        problem = self.desktop_problem()
+        if problem:
+            raise PlatformUnsupported(f"{what}: {problem}")
+
+    def self_elevated(self) -> bool:
+        return hasattr(os, "geteuid") and os.geteuid() == 0
+
+    def _xdo(self, *args: str, timeout: float = 10.0) -> str:
+        return _run_ok(["xdotool", *args], timeout=timeout)
+
+    def window_info(self, handle: int) -> WindowInfo | None:
+        if self.desktop_problem():
+            return None
+        try:
+            title = self._xdo("getwindowname", str(handle)).strip()
+            pid = int(self._xdo("getwindowpid", str(handle)).strip() or 0)
+        except (OSError, ValueError):
+            return None
+        try:
+            class_name = self._xdo("getwindowclassname", str(handle)).strip()
+        except OSError:
+            class_name = ""
+        proc, elevated = "?", False
+        if pid:
+            import psutil
+
+            try:
+                process = psutil.Process(pid)
+                proc = process.name()
+                elevated = process.uids().real == 0 and not self.self_elevated()
+            except psutil.Error:
+                pass
+        return WindowInfo(title=title, process=proc, class_name=class_name, pid=pid, handle=handle, elevated=elevated)
+
+    def active_window(self) -> WindowInfo | None:
+        self._require_input("identifying the foreground window")
+        try:
+            handle = int(self._xdo("getactivewindow").strip())
+        except (OSError, ValueError):
+            return None
+        return self.window_info(handle)
+
+    def focus_window(self, handle: int) -> bool:
+        self._require_input("focusing a window")
+        try:
+            self._xdo("windowactivate", "--sync", str(handle), timeout=5)
+        except OSError:
+            if shutil.which("wmctrl") is None:
+                raise
+            _run_ok(["wmctrl", "-ia", f"0x{handle:x}"])
+        current = self.active_window()
+        return current is not None and current.handle == handle
+
+    def ui_snapshot(self, handle: int) -> UiSnapshot:
+        raise PlatformUnsupported(
+            "listing the elements of a window is not implemented on Linux yet; use read_screen_text "
+            "to see the text on screen and desktop_click with text= to click it (OCR)"
+        )
+
+    def input_click(self, x: int, y: int, double: bool = False) -> None:
+        self._require_input("clicking")
+        self._xdo("mousemove", str(int(x)), str(int(y)))
+        if double:
+            self._xdo("click", "--repeat", "2", "--delay", "80", "1")
+        else:
+            self._xdo("click", "1")
+
+    def input_text(self, text: str) -> None:
+        self._require_input("typing")
+        self._xdo("type", "--delay", "12", "--clearmodifiers", "--", text, timeout=max(10.0, len(text) * 0.05))
+
+    def input_keys(self, keys: list[str]) -> None:
+        self._require_input("pressing keys")
+        names = []
+        for key in keys:
+            if key not in _XDO_KEYS and not re.fullmatch(r"[a-z0-9]|f\d{1,2}", key):
+                raise PlatformUnsupported(f"no xdotool key name for '{key}'")
+            names.append(_XDO_KEYS.get(key, key.upper() if re.fullmatch(r"f\d{1,2}", key) else key))
+        self._xdo("key", "--clearmodifiers", "+".join(names))
+
+    def input_scroll(self, x: int, y: int, direction: str, amount: int) -> None:
+        self._require_input("scrolling")
+        button = {"up": "4", "down": "5", "left": "6", "right": "7"}[direction]
+        self._xdo("mousemove", str(int(x)), str(int(y)))
+        self._xdo("click", "--repeat", str(max(1, int(amount))), "--delay", "20", button)
 
     # -- voice ------------------------------------------------------------
     def prepare_gpu_libs(self) -> None:

@@ -12,6 +12,7 @@ import os
 import platform as _stdlib_platform
 import re
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -49,6 +50,51 @@ class AppEntry:
 
 # (process name, window title, pid, window handle)
 WindowRow = tuple[str, str, int, int]
+
+
+@dataclass(frozen=True)
+class WindowInfo:
+    """A top-level window as the desktop-control tools need to know it."""
+
+    title: str
+    process: str
+    class_name: str
+    pid: int
+    handle: int
+    # True when the window's process runs with administrator rights (or could not be
+    # inspected because it is protected). A normal-rights Jarvis cannot drive it.
+    elevated: bool = False
+    minimized: bool = False
+    rect: tuple[int, int, int, int] | None = None  # left, top, right, bottom in screen pixels
+
+
+@dataclass
+class UiElement:
+    """One element of a window's accessibility tree, as shown to the model.
+
+    ``ref`` is stable for a window until the element goes away; it never exposes a pixel
+    position. ``rect`` is kept for the tools' own use (fallback clicks, visibility)."""
+
+    ref: int
+    role: str  # button, checkbox, edit, link, list item, menu item, tab, text, ...
+    name: str = ""
+    value: str = ""
+    state: str = ""  # on/off, selected, expanded/collapsed, read-only ...
+    enabled: bool = True
+    automation_id: str = ""
+    is_password: bool = False
+    rect: tuple[int, int, int, int] | None = None
+
+
+@dataclass
+class UiSnapshot:
+    window: WindowInfo
+    elements: list[UiElement] = field(default_factory=list)  # tree order, visible and useful only
+    total: int = 0  # elements seen in the whole tree (before filtering)
+
+
+class ElementGone(OSError):
+    """The element a ref pointed to no longer exists; inspect the window again."""
 
 
 @runtime_checkable
@@ -91,6 +137,28 @@ class Platform(Protocol):
     def has_excel_com(self) -> bool: ...
     def prepare_gpu_libs(self) -> None: ...
     def helper_report(self) -> list[tuple[str, bool, str]]: ...
+    # -- senses and hands (camera, desktop control) --
+    def camera_backends(self) -> list[str]: ...
+    def camera_access_problem(self) -> str | None: ...
+    def camera_devices(self) -> list[str] | None: ...
+    def desktop_problem(self) -> str | None: ...
+    def can_inspect_elements(self) -> bool: ...
+    def self_elevated(self) -> bool: ...
+    def input_desktop_available(self) -> bool: ...
+    def active_window(self) -> WindowInfo | None: ...
+    def window_info(self, handle: int) -> WindowInfo | None: ...
+    def window_at(self, x: int, y: int) -> WindowInfo | None: ...
+    def focus_window(self, handle: int) -> bool: ...
+    def ui_snapshot(self, handle: int) -> UiSnapshot: ...
+    def ui_read(self, handle: int, ref: int) -> UiElement: ...
+    def ui_act(self, handle: int, ref: int, action: str) -> str: ...
+    def ui_clear(self, handle: int, ref: int) -> bool: ...
+    def ui_focus_element(self, handle: int, ref: int) -> str: ...
+    def ui_focused(self) -> UiElement | None: ...
+    def input_click(self, x: int, y: int, double: bool = False) -> None: ...
+    def input_text(self, text: str) -> None: ...
+    def input_keys(self, keys: list[str]) -> None: ...
+    def input_scroll(self, x: int, y: int, direction: str, amount: int) -> None: ...
 
 
 class BasePlatform:
@@ -211,6 +279,78 @@ class BasePlatform:
     def helper_report(self) -> list[tuple[str, bool, str]]:
         """(helper, present, one-line fix) for programs Jarvis uses on this OS."""
         return []
+
+    # -- camera ------------------------------------------------------------
+    def camera_backends(self) -> list[str]:
+        """OpenCV capture backends to try, best first: names from {'dshow','msmf','v4l2','any'}."""
+        return ["any"]
+
+    def camera_access_problem(self) -> str | None:
+        """Why the OS would refuse camera access (a privacy switch, device permissions), or None."""
+        return None
+
+    def camera_devices(self) -> list[str] | None:
+        """Names of the cameras the system reports, [] if it reports none, None if it cannot tell."""
+        return None
+
+    # -- desktop control ----------------------------------------------------
+    def desktop_problem(self) -> str | None:
+        """Why input synthesis is unavailable on this machine right now, or None if it works."""
+        return f"desktop control is not supported on {self.describe()}"
+
+    def can_inspect_elements(self) -> bool:
+        """True where the accessibility tree of a window can be listed (UI Automation on Windows)."""
+        return False
+
+    def self_elevated(self) -> bool:
+        return False
+
+    def input_desktop_available(self) -> bool:
+        """False while a secure desktop (UAC prompt, lock screen) owns the input."""
+        return True
+
+    def active_window(self) -> WindowInfo | None:
+        raise self.unsupported("identifying the foreground window")
+
+    def window_info(self, handle: int) -> WindowInfo | None:
+        raise self.unsupported("reading window details")
+
+    def window_at(self, x: int, y: int) -> WindowInfo | None:
+        """The top-level window under a screen point, or None when unknown."""
+        return None
+
+    def focus_window(self, handle: int) -> bool:
+        raise self.unsupported("focusing windows")
+
+    def ui_snapshot(self, handle: int) -> UiSnapshot:
+        raise self.unsupported("listing the elements of a window")
+
+    def ui_read(self, handle: int, ref: int) -> UiElement:
+        raise self.unsupported("reading a window element")
+
+    def ui_act(self, handle: int, ref: int, action: str) -> str:
+        raise self.unsupported("acting on a window element")
+
+    def ui_clear(self, handle: int, ref: int) -> bool:
+        raise self.unsupported("editing a window element")
+
+    def ui_focus_element(self, handle: int, ref: int) -> str:
+        raise self.unsupported("focusing a window element")
+
+    def ui_focused(self) -> UiElement | None:
+        return None
+
+    def input_click(self, x: int, y: int, double: bool = False) -> None:
+        raise self.unsupported("clicking")
+
+    def input_text(self, text: str) -> None:
+        raise self.unsupported("typing")
+
+    def input_keys(self, keys: list[str]) -> None:
+        raise self.unsupported("pressing keys")
+
+    def input_scroll(self, x: int, y: int, direction: str, amount: int) -> None:
+        raise self.unsupported("scrolling")
 
 
 def kill_with_psutil(pid: int) -> None:

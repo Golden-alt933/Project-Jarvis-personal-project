@@ -29,6 +29,9 @@ from jarvis.platform.base import (
     AppEntry,
     BasePlatform,
     PlatformUnsupported,
+    UiElement,
+    UiSnapshot,
+    WindowInfo,
     WindowRow,
     kill_with_psutil,
 )
@@ -378,6 +381,171 @@ class WindowsPlatform(BasePlatform):
         except Exception:
             log.debug("GetCursorPos failed", exc_info=True)
         return None
+
+    # -- camera -----------------------------------------------------------
+    def camera_backends(self) -> list[str]:
+        # DirectShow opens in about a second here; Media Foundation took five. MSMF is the fallback.
+        return ["dshow", "msmf"]
+
+    def camera_access_problem(self) -> str | None:
+        """Windows has a master camera switch and one for desktop apps; either set to Deny blocks us."""
+        try:
+            import winreg
+        except ImportError:
+            return None
+        base = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+        checks = [
+            (winreg.HKEY_LOCAL_MACHINE, base, "Windows 'Camera access' is off for this device"),
+            (winreg.HKEY_CURRENT_USER, base, "Windows 'Camera access' is off for this account"),
+            (winreg.HKEY_CURRENT_USER, base + r"\NonPackaged", "'Let desktop apps access your camera' is off"),
+        ]
+        for hive, path, meaning in checks:
+            try:
+                with winreg.OpenKey(hive, path) as key:
+                    if str(winreg.QueryValueEx(key, "Value")[0]).lower() == "deny":
+                        return f"{meaning}. Turn it on in Settings > Privacy & security > Camera."
+            except OSError:
+                continue
+        return None
+
+    def camera_devices(self) -> list[str] | None:
+        try:
+            out = _powershell(
+                "Get-PnpDevice -Class Camera -PresentOnly -ErrorAction SilentlyContinue | "
+                "Select-Object -ExpandProperty FriendlyName | ConvertTo-Json -Compress",
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = out.stdout.strip()
+        if out.returncode != 0:
+            return None
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return [str(n) for n in (data if isinstance(data, list) else [data]) if n]
+
+    # -- desktop control ----------------------------------------------------
+    _uia_session: Any = None
+
+    def _uia(self) -> Any:
+        if WindowsPlatform._uia_session is None:
+            from jarvis.platform.windows_uia import UiaSession
+
+            WindowsPlatform._uia_session = UiaSession()
+        return WindowsPlatform._uia_session
+
+    def desktop_problem(self) -> str | None:
+        if os.name != "nt":
+            return "desktop control needs Windows"
+        try:
+            import comtypes  # noqa: F401
+        except ImportError:
+            return "the 'desktop' extra is not installed (needs comtypes): uv sync --extra desktop"
+        return None
+
+    def can_inspect_elements(self) -> bool:
+        return True
+
+    def self_elevated(self) -> bool:
+        from jarvis.platform import windows_input as wi
+
+        return wi.self_elevated()
+
+    def input_desktop_available(self) -> bool:
+        from jarvis.platform import windows_input as wi
+
+        return wi.input_desktop_available()
+
+    def window_info(self, handle: int) -> WindowInfo | None:
+        from jarvis.platform import windows_input as wi
+
+        if os.name != "nt" or not handle:
+            return None
+        title, class_name, pid, minimized, rect = wi.window_details(handle)
+        try:
+            proc = psutil.Process(pid).name()
+        except psutil.Error:
+            proc = "?"
+        return WindowInfo(
+            title=title.strip(), process=proc, class_name=class_name, pid=pid, handle=handle,
+            elevated=wi.process_elevated(pid), minimized=minimized, rect=rect,
+        )
+
+    def window_at(self, x: int, y: int) -> WindowInfo | None:
+        from jarvis.platform import windows_input as wi
+
+        return self.window_info(wi.root_window_at(int(x), int(y)))
+
+    def active_window(self) -> WindowInfo | None:
+        from jarvis.platform import windows_input as wi
+
+        return self.window_info(wi.foreground_handle())
+
+    def focus_window(self, handle: int) -> bool:
+        from jarvis.platform import windows_input as wi
+
+        return wi.bring_to_front(handle)
+
+    def ui_snapshot(self, handle: int) -> UiSnapshot:
+        self.prepare_capture()
+        info = self.window_info(handle)
+        if info is None:
+            raise OSError("that window no longer exists")
+        session = self._uia()
+        elements, total = session.run(session.snapshot, handle)
+        return UiSnapshot(window=info, elements=elements, total=total)
+
+    def ui_read(self, handle: int, ref: int) -> UiElement:
+        session = self._uia()
+        return session.run(session.read, handle, ref)
+
+    def ui_act(self, handle: int, ref: int, action: str) -> str:
+        from jarvis.platform import windows_input as wi
+
+        self.prepare_capture()
+        session = self._uia()
+        return session.run(session.act, handle, ref, action, wi.click, timeout=30)
+
+    def ui_clear(self, handle: int, ref: int) -> bool:
+        session = self._uia()
+        return session.run(session.clear, handle, ref)
+
+    def ui_focus_element(self, handle: int, ref: int) -> str:
+        from jarvis.platform import windows_input as wi
+
+        self.prepare_capture()
+        session = self._uia()
+        return session.run(session.focus, handle, ref, wi.click)
+
+    def ui_focused(self) -> UiElement | None:
+        session = self._uia()
+        return session.run(session.focused)
+
+    def input_click(self, x: int, y: int, double: bool = False) -> None:
+        from jarvis.platform import windows_input as wi
+
+        self.prepare_capture()
+        wi.click(x, y, double)
+
+    def input_text(self, text: str) -> None:
+        from jarvis.platform import windows_input as wi
+
+        wi.type_text(text)
+
+    def input_keys(self, keys: list[str]) -> None:
+        from jarvis.platform import windows_input as wi
+
+        wi.press_chord(keys)
+
+    def input_scroll(self, x: int, y: int, direction: str, amount: int) -> None:
+        from jarvis.platform import windows_input as wi
+
+        self.prepare_capture()
+        wi.scroll(x, y, direction, amount)
 
     # -- office / voice ---------------------------------------------------
     def has_excel_com(self) -> bool:

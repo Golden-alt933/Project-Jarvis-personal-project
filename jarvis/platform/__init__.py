@@ -14,13 +14,18 @@ import sys
 from jarvis.platform.base import (
     AppEntry,
     BasePlatform,
+    ElementGone,
     Platform,
     PlatformUnsupported,
+    UiElement,
+    UiSnapshot,
+    WindowInfo,
     WindowRow,
 )
 
 __all__ = [
     "AppEntry", "BasePlatform", "Platform", "PlatformUnsupported", "WindowRow",
+    "ElementGone", "UiElement", "UiSnapshot", "WindowInfo",
     "current", "set_backend", "create",
 ]
 
