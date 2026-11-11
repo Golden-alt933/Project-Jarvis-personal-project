@@ -104,8 +104,8 @@ jobs:
             exit 0
           fi
           set +e
-          xvfb-run -a timeout 8 jarvis --hud-demo
-          code=$?
+          QT_DEBUG_PLUGINS=1 xvfb-run -a timeout 8 jarvis --hud-demo 2>&1 | tail -40
+          code=${PIPESTATUS[0]}
           echo "hud-demo exit code: $code"
           # 124 = still running when the timeout ended it, which is what a healthy demo does
           [ "$code" -eq 0 ] || [ "$code" -eq 124 ]

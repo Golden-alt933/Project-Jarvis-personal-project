@@ -87,7 +87,7 @@ def test_powershell_script_parses():
     assert done.returncode == 0, done.stdout + done.stderr
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="no bash")
+@pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None, reason="needs a POSIX bash (on Windows `bash` may be the WSL stub)")
 def test_bash_syntax():
     done = subprocess.run(["bash", "-n", str(SH)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
