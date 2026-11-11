@@ -28,10 +28,12 @@ MIN_PYTHON = (3, 13)
 # optional extras and the module that proves each is installed
 EXTRAS: dict[str, tuple[str, ...]] = {
     "office": ("openpyxl", "pypdf", "docx"),
-    "screen": ("mss", "PIL", "rapidocr_onnxruntime"),
+    "screen": ("mss", "PIL", "rapidocr_onnxruntime", "cv2"),
     "browser": ("websockets",),
     "voice": ("numpy", "sounddevice", "faster_whisper", "piper", "onnxruntime"),
     "hud": ("PyQt6", "qasync"),
+    # comtypes (Windows UI Automation) is only part of the desktop extra on Windows
+    "desktop": ("comtypes",) if sys.platform == "win32" else (),
 }
 
 
@@ -145,6 +147,11 @@ def cuda_devices() -> int:
         return 0
 
 
+def probe_cameras() -> list[str] | None:
+    """Camera names the system reports ([] = none, None = cannot tell). Does not switch a camera on."""
+    return plat.current().camera_devices()
+
+
 def nvidia_smi_present() -> bool:
     return shutil.which("nvidia-smi") is not None
 
@@ -231,6 +238,8 @@ def check_ollama(settings: Settings) -> tuple[Check, bool]:
 def check_extras() -> list[Check]:
     checks = []
     for extra, modules in EXTRAS.items():
+        if not modules:
+            continue
         missing = [m for m in modules if not module_present(m)]
         if not missing:
             checks.append(Check(f"Extra: {extra}", PASS, "installed"))
@@ -300,6 +309,57 @@ def check_extension(settings: Settings) -> Check:
     )
 
 
+# -- senses and hands: camera, desktop control ----------------------------------------------
+CAMERA_MODES = ("ask", "on", "off")
+
+
+def check_camera(settings: Settings) -> Check:
+    mode = settings.camera.strip().lower()
+    if mode not in CAMERA_MODES:
+        return Check(
+            "Camera", WARN, f"JARVIS_CAMERA={settings.camera!r} is not ask, on or off (treated as ask)",
+            "set JARVIS_CAMERA to ask, on or off",
+        )
+    if mode == "off":
+        return Check("Camera", SKIP, "turned off (JARVIS_CAMERA=off)")
+    if not module_present("cv2"):
+        return Check(
+            "Camera", WARN, "OpenCV is not installed",
+            "reinstall with the screen extra: uv tool install --reinstall 'jarvis[screen]' (from a checkout: uv sync --extra screen)",
+        )
+    problem = plat.current().camera_access_problem()
+    if problem:
+        return Check("Camera", WARN, f"JARVIS_CAMERA={mode}; {problem}", "allow camera access in the system privacy settings")
+    names = probe_cameras()
+    if names is None:
+        return Check("Camera", PASS, f"JARVIS_CAMERA={mode}; this system does not list cameras, so none was checked")
+    if not names:
+        return Check("Camera", WARN, f"no camera found (JARVIS_CAMERA={mode})", "plug in a camera, or check that the built-in one is enabled")
+    shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    return Check("Camera", PASS, f"{len(names)} found ({shown}); JARVIS_CAMERA={mode}")
+
+
+def check_desktop() -> Check:
+    backend = plat.current()
+    problem = backend.desktop_problem()
+    if problem:
+        if backend.name == "windows":
+            fix = "reinstall with the desktop extra: uv tool install --reinstall 'jarvis[all]' (from a checkout: uv sync --extra desktop)"
+        elif backend.name == "linux":
+            from jarvis.platform.linux import install_command
+
+            fix = install_command("xdotool") or "needs an X11 session and the xdotool package"
+        else:
+            fix = ""
+        return Check("Desktop control", WARN, problem, fix)
+    if backend.can_inspect_elements():
+        return Check("Desktop control", PASS, "UI Automation available: controls can be inspected and driven; OCR clicks work too")
+    return Check(
+        "Desktop control", PASS,
+        "xdotool present: typing, keys and OCR clicks work; listing a window's controls is not implemented on Linux",
+    )
+
+
 def check_helpers() -> list[Check]:
     checks = []
     for name, present, fix in plat.current().helper_report():
@@ -321,6 +381,8 @@ def run_checks(settings: Settings, *, offline: bool = False) -> list[Check]:
     checks.append(check_speech_models(settings, voice_installed))
     checks.append(check_gpu(voice_installed))
     checks.append(check_extension(settings))
+    checks.append(check_camera(settings))
+    checks.append(check_desktop())
     checks.extend(check_helpers())
     return checks
 
