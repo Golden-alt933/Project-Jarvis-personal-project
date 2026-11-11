@@ -67,7 +67,7 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.ps1 | iex
 ```
 
-The scripts install [uv](https://docs.astral.sh/uv/) with Astral's official installer if it is missing (they tell you when they do), install Jarvis as a uv tool at a pinned release (`v0.2.0`), and then start `jarvis --setup`. Re-running a script upgrades. Python 3.13 is fetched by uv if you do not have it.
+The scripts install [uv](https://docs.astral.sh/uv/) with Astral's official installer if it is missing (they tell you when they do), install Jarvis as a uv tool at a pinned release (`v0.2.1`), and then start `jarvis --setup`. Re-running a script upgrades. Python 3.13 is fetched by uv if you do not have it.
 
 Options for `install.sh` (pass them after `bash -s --`, or save the file and run it): `--minimal` (no extras: text mode only), `--gpu` (add the NVIDIA CUDA libraries), `--ref <tag|branch|commit>`, `--system-deps`. For `install.ps1` set environment variables first, because `irm | iex` cannot take arguments: `JARVIS_REF`, `JARVIS_MINIMAL=1`, `JARVIS_GPU=1`; a saved script also takes `--minimal`, `--gpu`, `--ref`. `JARVIS_NO_SETUP=1` skips the setup step in both.
 
@@ -76,7 +76,7 @@ On Linux the script checks for system libraries and helpers (libportaudio2, xcli
 The same thing by hand, with uv installed:
 
 ```bash
-uv tool install --python 3.13 "jarvis[all] @ git+https://github.com/Golden-alt933/Project-Jarvis-personal-project@v0.2.0"
+uv tool install --python 3.13 "jarvis[all] @ git+https://github.com/Golden-alt933/Project-Jarvis-personal-project@v0.2.1"
 ```
 
 Extras: `office` (documents, Excel), `screen` (capture, OCR), `browser` (Chrome bridge), `voice`, `hud`, `gpu` (CUDA libraries), and `all` (everything except `gpu`). To bump the release, change the one marked line (`JARVIS_DEFAULT_REF` / `$DefaultRef`) in each installer when you tag a new version.
