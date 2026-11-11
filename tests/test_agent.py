@@ -637,3 +637,34 @@ async def test_cancel_before_first_read_is_honoured_and_idle_cancel_is_forgotten
     agent.cancel()  # after the turn was started, before its stream is first read
     events = [ev async for ev in stream]
     assert done(events).stopped == "cancelled"
+
+
+async def test_hosted_alternate_is_tried_before_the_local_model(store):
+    primary = ScriptedLLM([LLMUnavailable("stalled")], name="big")
+    alternate = ScriptedLLM(["From the other hosted model."], name="small")
+    local = ScriptedLLM(["Local here."], name="local", is_local=True)
+    agent = make_agent(store, primary, fallback=local, alternates=[primary, alternate])
+    events = await run(agent)
+    assert done(events).text == "From the other hosted model." and done(events).model == "small-model"
+    assert not any(isinstance(e, Notice) for e in events)  # hosted to hosted is not news
+    assert "shelly" in alternate.tool_names[0]  # full toolset, not the local subset
+    assert local.calls == []
+
+
+async def test_local_model_is_the_last_resort_when_every_hosted_model_fails(store):
+    primary = ScriptedLLM([LLMUnavailable("down")], name="big")
+    alternate = ScriptedLLM([LLMUnavailable("down too")], name="small")
+    local = ScriptedLLM(["Local here."], name="local", is_local=True)
+    agent = make_agent(store, primary, fallback=local, alternates=[primary, alternate])
+    events = await run(agent)
+    assert done(events).text == "Local here."
+    assert sum(isinstance(e, Notice) for e in events) == 1
+
+
+async def test_the_voice_model_falls_back_to_the_main_hosted_model(store):
+    main = ScriptedLLM(["Main model answering."], name="big")
+    voice = ScriptedLLM([LLMUnavailable("stalled")], name="small")
+    agent = make_agent(store, main, alternates=[main, voice])
+    agent.primary = voice  # what App.use_voice_model() does
+    events = await run(agent)
+    assert done(events).model == "big-model"

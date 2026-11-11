@@ -67,7 +67,7 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.ps1 | iex
 ```
 
-The scripts install [uv](https://docs.astral.sh/uv/) with Astral's official installer if it is missing (they tell you when they do), install Jarvis as a uv tool at a pinned release (`v0.1.0`), and then start `jarvis --setup`. Re-running a script upgrades. Python 3.13 is fetched by uv if you do not have it.
+The scripts install [uv](https://docs.astral.sh/uv/) with Astral's official installer if it is missing (they tell you when they do), install Jarvis as a uv tool at a pinned release (`v0.2.0`), and then start `jarvis --setup`. Re-running a script upgrades. Python 3.13 is fetched by uv if you do not have it.
 
 Options for `install.sh` (pass them after `bash -s --`, or save the file and run it): `--minimal` (no extras: text mode only), `--gpu` (add the NVIDIA CUDA libraries), `--ref <tag|branch|commit>`, `--system-deps`. For `install.ps1` set environment variables first, because `irm | iex` cannot take arguments: `JARVIS_REF`, `JARVIS_MINIMAL=1`, `JARVIS_GPU=1`; a saved script also takes `--minimal`, `--gpu`, `--ref`. `JARVIS_NO_SETUP=1` skips the setup step in both.
 
@@ -76,7 +76,7 @@ On Linux the script checks for system libraries and helpers (libportaudio2, xcli
 The same thing by hand, with uv installed:
 
 ```bash
-uv tool install --python 3.13 "jarvis[all] @ git+https://github.com/Golden-alt933/Project-Jarvis-personal-project@v0.1.0"
+uv tool install --python 3.13 "jarvis[all] @ git+https://github.com/Golden-alt933/Project-Jarvis-personal-project@v0.2.0"
 ```
 
 Extras: `office` (documents, Excel), `screen` (capture, OCR), `browser` (Chrome bridge), `voice`, `hud`, `gpu` (CUDA libraries), and `all` (everything except `gpu`). To bump the release, change the one marked line (`JARVIS_DEFAULT_REF` / `$DefaultRef`) in each installer when you tag a new version.
@@ -249,6 +249,22 @@ Settings are read in this order, first match wins:
 | Data folder | `%LOCALAPPDATA%\Jarvis` | `${XDG_DATA_HOME:-~/.local/share}/jarvis` |
 
 `JARVIS_DATA_DIR` overrides the data folder. It holds `jarvis.db` (conversations, summaries, facts; SQLite), `history.txt` (prompt history), `logs/jarvis.log` (rotating; keys and request bodies are never logged), `voices/` (speech voices), `browser-token` (Chrome pairing token) and `hud.json`. Whisper models are cached by Hugging Face under `~/.cache/huggingface` (or `HF_HOME`).
+
+## Models and fallback
+
+Everything heavy runs on free hosted services by default, so the laptop mostly carries audio capture, the window and the tools themselves. With the default NVIDIA provider:
+
+| Job | Default | Runs |
+|---|---|---|
+| Reasoning in text mode | `nvidia/nemotron-3-ultra-550b-a55b` | hosted |
+| Reasoning in voice and the HUD | `nvidia/nemotron-3.5-lightning-30b-a3b` (reasoning off) | hosted |
+| Summarising old conversation | the lightning model | hosted |
+| Looking at the screen, images and the camera | `nvidia/nemotron-3.5-super-vl-120b-a12b` | hosted |
+| Speech recognition | NVIDIA Parakeet, after a local wake-word check | hosted (check is local) |
+| Speech synthesis | Microsoft Edge neural voice `en-GB-RyanNeural` | hosted |
+| Voice-activity detection, screen OCR | Silero VAD, RapidOCR | local |
+
+When a hosted model does not answer (the free tier sometimes stalls), Jarvis first retries, then switches to the other hosted model, and only if both fail falls back to the local Ollama model, which is slower, offers fewer tools and loads about 2.5 GB onto the machine. Speech falls back per sentence to the local engines (Piper, faster-whisper). Set `JARVIS_LOCAL_FALLBACK=false` to never load a local model, or `jarvis --local` to use only local ones. An explicit `JARVIS_MODEL` is always respected: Jarvis then never switches to a different hosted model on its own.
 
 ## Voice mode
 

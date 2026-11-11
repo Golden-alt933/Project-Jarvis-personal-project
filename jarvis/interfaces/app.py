@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 
 from jarvis.agent.loop import Agent
 from jarvis.config import Settings
-from jarvis.llm.providers import build_clients, build_fast_client
+from jarvis.llm.providers import build_alternates, build_clients, build_fast_client
 from jarvis.llm.types import LLMClient
 from jarvis.memory.store import MemoryStore
 from jarvis.tools.registry import ToolRegistry
@@ -94,7 +94,10 @@ def build_app(settings: Settings | None = None, *, force_local: bool = False) ->
         primary, fallback = build_clients(settings)
         fast = build_fast_client(settings)
         previous = store.latest_conversation(12)
-        agent = Agent(primary, registry, store, settings, fallback=fallback, fast=fast)
+        alternates = [] if primary.is_local else build_alternates(settings)
+        agent = Agent(
+            primary, registry, store, settings, fallback=fallback, fast=fast, alternates=alternates
+        )
     except BaseException:
         store.close()
         raise

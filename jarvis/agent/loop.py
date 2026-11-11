@@ -67,7 +67,7 @@ class _Turn:
     tool_calls: int = 0
     usage: Usage | None = None
     call_counts: dict[str, int] = field(default_factory=dict)
-    on_fallback: bool = False
+    tried: list[str] = field(default_factory=list)  # models that failed this turn
 
     def add_usage(self, usage: Usage | None) -> None:
         if usage is None:
@@ -87,9 +87,14 @@ class Agent:
         settings: "Settings",
         fallback: LLMClient | None = None,
         fast: LLMClient | None = None,
+        alternates: list[LLMClient] | None = None,
     ) -> None:
         self.primary = primary
         self.fallback = fallback
+        # Other hosted models to try, in order, before the local fallback. A stalled
+        # free-tier request is far more common than a real outage, and switching to a
+        # local model means loading gigabytes onto the user's machine.
+        self.alternates: list[LLMClient] = list(alternates or [])
         self.fast = fast or primary
         self.registry = registry
         self.store = store
@@ -376,16 +381,27 @@ class Agent:
                 await self.context.compact(self.conversation_id, aggressive=True)
                 turn.history, turn.summary = await self.context.build(self.conversation_id)
             except LLMUnavailable as exc:
-                fallback = self.fallback
-                if emitted or turn.on_fallback or fallback is None or fallback is turn.client:
+                successor = None if emitted else self._next_client(turn)
+                if successor is None:
                     raise
-                log.warning("primary unavailable (%s); switching to %s", exc, fallback.name)
-                turn.client = fallback
-                turn.on_fallback = True
-                yield Notice(
-                    f"{self.primary.name} is unreachable; continuing on the local model "
-                    f"({fallback.model}) with a reduced toolset."
-                )
+                log.warning("%s unavailable (%s); switching to %s", turn.client.model, exc, successor.model)
+                turn.tried.append(turn.client.model)
+                turn.client = successor
+                if successor.is_local:  # worth telling the user: slower, fewer tools
+                    yield Notice(
+                        f"{self.primary.name} is unreachable; continuing on the local model "
+                        f"({successor.model}) with a reduced toolset."
+                    )
+
+    def _next_client(self, turn: _Turn) -> LLMClient | None:
+        """The next model to try this turn: hosted alternates first, the local one last."""
+        for candidate in (*self.alternates, self.fallback):
+            if candidate is None or candidate is turn.client:
+                continue
+            if candidate.model == turn.client.model or candidate.model in turn.tried:
+                continue
+            return candidate
+        return None
 
     async def _stream(
         self, client: LLMClient, messages: list[Message], tools: list[dict[str, Any]] | None

@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.ps1 | iex
 #
 # Options cannot be passed through `irm | iex`; set environment variables first instead:
-#   $env:JARVIS_REF = 'v0.1.0'; $env:JARVIS_MINIMAL = '1'; $env:JARVIS_GPU = '1'; $env:JARVIS_NO_SETUP = '1'
+#   $env:JARVIS_REF = 'v0.2.0'; $env:JARVIS_MINIMAL = '1'; $env:JARVIS_GPU = '1'; $env:JARVIS_NO_SETUP = '1'
 # When the file is saved and run directly the flags work too:
 #   .\install.ps1 --minimal --gpu --ref main
 #
@@ -13,7 +13,7 @@
 $ErrorActionPreference = 'Stop'
 
 # ---- release to install: bump this one line when cutting a release ------------------
-$DefaultRef = 'v0.1.0'
+$DefaultRef = 'v0.2.0'
 # --------------------------------------------------------------------------------------
 
 $RepoUrl = 'https://github.com/Golden-alt933/Project-Jarvis-personal-project'

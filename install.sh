@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ---- release to install: bump this one line when cutting a release ------------------
-JARVIS_DEFAULT_REF="v0.1.0"
+JARVIS_DEFAULT_REF="v0.2.0"
 # --------------------------------------------------------------------------------------
 
 REPO_URL="https://github.com/Golden-alt933/Project-Jarvis-personal-project"

@@ -12,7 +12,7 @@ from jarvis.llm.openai_compat import OpenAICompatClient
 from jarvis.llm.types import ConfigError, LLMClient
 
 __all__ = [
-    "ConfigError", "PROFILES", "MODEL_OPTIONS", "ModelOptions", "build_clients",
+    "ConfigError", "PROFILES", "MODEL_OPTIONS", "ModelOptions", "build_alternates", "build_clients",
     "build_fast_client", "build_voice_client", "describe",
 ]
 
@@ -151,6 +151,21 @@ def build_clients(settings: Settings) -> tuple[LLMClient, LLMClient | None]:
     primary = _cloud(settings)
     fallback = _ollama(settings) if settings.local_fallback else None
     return primary, fallback
+
+
+def build_alternates(settings: Settings) -> list[LLMClient]:
+    """Other hosted models the agent may switch to when the one in use does not answer.
+
+    Only for NVIDIA with the default models: both were measured to pass the same tool-use
+    checks, so either can stand in for the other. An explicit JARVIS_MODEL is respected
+    (no silent switch to a model the user did not choose).
+    """
+    if settings.provider.lower() != "nvidia" or settings.model.strip():
+        return []
+    try:
+        return [_cloud(settings, NVIDIA_DEFAULT_MODEL), _cloud(settings, LIGHTNING_MODEL)]
+    except ConfigError:
+        return []
 
 
 def build_fast_client(settings: Settings) -> LLMClient:
