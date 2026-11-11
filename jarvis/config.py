@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     vision_model: str = Field("", alias="JARVIS_VISION_MODEL")  # empty = provider default
     ollama_vision_model: str = Field("qwen2.5vl:3b", alias="OLLAMA_VISION_MODEL")
 
+    # Camera (senses). ask = confirm the first use in each process; on = never ask; off = disabled.
+    camera: str = Field("ask", alias="JARVIS_CAMERA")
+    camera_index: str = Field("", alias="JARVIS_CAMERA_INDEX")  # empty = first camera that opens
+
     # Chrome extension bridge (loopback only)
     browser_bridge_port: int = Field(8765, alias="JARVIS_BROWSER_PORT")
 

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from jarvis.platform.base import BasePlatform
+
 # Auto-starting Ollama is a real side effect (a server process that outlives the run).
 # Tests that exercise the auto-start logic pass it explicitly with the launch mocked.
 os.environ["JARVIS_OLLAMA_AUTOSTART"] = "false"
@@ -32,8 +34,9 @@ def _no_libreoffice(monkeypatch):
     monkeypatch.setattr(excel_calc, "find_soffice", lambda: None)
 
 
-class FakePlatform:
-    """An in-memory OS backend: records what tools ask of it. Not tied to any real OS."""
+class FakePlatform(BasePlatform):
+    """An in-memory OS backend: records what tools ask of it. Not tied to any real OS.
+    Inherits the defaults for operations a test does not care about (camera, desktop control)."""
 
     name = "fake"
     app_dir_name = "jarvis"

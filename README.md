@@ -206,6 +206,8 @@ Settings are read in this order, first match wins:
 | `JARVIS_VISION_PROVIDER` | `auto` | `auto`, `cloud` or `local`; `local` keeps images on this machine |
 | `JARVIS_VISION_MODEL` | empty | Hosted vision model; empty uses the provider default |
 | `OLLAMA_VISION_MODEL` | `qwen2.5vl:3b` | Local vision model |
+| `JARVIS_CAMERA` | `ask` | Camera use: `ask` (confirm the first use in each session), `on` (never ask) or `off` |
+| `JARVIS_CAMERA_INDEX` | empty | Camera number when the PC has several; empty uses the first that opens |
 | `JARVIS_BROWSER_PORT` | `8765` | Loopback port for the Chrome extension bridge |
 | `JARVIS_DATA_DIR` | empty | Data folder; empty uses the per-user default below |
 <!-- config-table:end -->
