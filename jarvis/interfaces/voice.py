@@ -160,6 +160,7 @@ async def run_voice(app: App, console: Console | None = None) -> int:
         console.print(Text(f"Voice turns use {voice_model}.", style="dim"))
     session = VoiceSession(app.agent, mic, speaker, endpointer, transcriber, synthesizer, settings, display.handle)
     console.print(Text(f"Loading {transcriber.name} and {synthesizer.name} ...", style="dim"))
+    log.info("Speech engines: recognition %s; synthesis %s", transcriber.name, synthesizer.name)
     try:
         await asyncio.gather(transcriber.warm_up(), synthesizer.warm_up())
         await session.prepare()

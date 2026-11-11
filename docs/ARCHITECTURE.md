@@ -91,8 +91,19 @@ checkout, detected by `pyproject.toml` beside the package), then the per-user fi
 
 Data that leaves the machine: every model call sends the conversation and tool results
 to the configured provider. `look_at_screen` and `describe_image` additionally send the
-image unless `JARVIS_VISION_PROVIDER=local`. OCR, speech recognition and speech synthesis
-are always local.
+image unless `JARVIS_VISION_PROVIDER=local`. OCR is always local. Speech is local by
+default only in local mode (`JARVIS_PROVIDER=ollama`); otherwise see the speech paragraph
+below.
+
+Speech (`voice/`): `build_synthesizer` returns Piper alone or a `FallbackSynthesizer`
+(Edge neural voice, then NVIDIA Magpie when a key is set, then Piper) that falls back per
+sentence on an error or when no audio arrives within 2.5 s, and stays on Piper for 45 s.
+Engines may offer `synthesize_stream`; the session's synthesis worker plays chunks as they
+arrive. Stock phrases are cached on disk per voice. `build_transcriber` returns the local
+faster-whisper alone, or a `GatedTranscriber`: a CPU tiny.en model hears every utterance,
+and only audio addressed to Jarvis (wake word, follow-up window, barge-in, confirmation
+answer, `--no-wake`) is sent to the online recogniser (NVIDIA Parakeet, or any
+`/audio/transcriptions` endpoint); on failure or after 4 s the local transcript is used.
 
 Frontends only consume `AgentEvent`s and supply `confirm`/`notify` callbacks, so the
 agent needs no change for a new one (a HUD is the next).

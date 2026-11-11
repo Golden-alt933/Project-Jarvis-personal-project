@@ -370,7 +370,7 @@ class FallbackSynthesizer:
         *,
         deadline: float = 2.5,
         chunk_deadline: float = 6.0,
-        cooloff: float = 120.0,
+        cooloff: float = 45.0,
         clock=time.monotonic,
         sample_rate: int = OUTPUT_RATE,
     ) -> None:
