@@ -36,6 +36,7 @@ def checkout(tmp_path, monkeypatch):
     user = tmp_path / "cfg" / ".env"
     user.parent.mkdir()
     monkeypatch.setattr(config, "REPO_ROOT", repo)
+    monkeypatch.delenv("JARVIS_IGNORE_REPO_ENV", raising=False)  # these tests are about that file
     monkeypatch.setenv("JARVIS_CONFIG_FILE", str(user))
     for var in ("NVIDIA_API_KEY", "JARVIS_USER_NAME", "JARVIS_PROVIDER", "GROQ_API_KEY"):
         monkeypatch.delenv(var, raising=False)

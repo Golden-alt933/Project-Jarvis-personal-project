@@ -10,7 +10,10 @@ import pytest
 # Tests that exercise the auto-start logic pass it explicitly with the launch mocked.
 os.environ["JARVIS_OLLAMA_AUTOSTART"] = "false"
 
-# Settings() must not read the developer's real per-user config file (it may hold a key).
+# Settings() must not read the developer's real config: neither the checkout's .env (set
+# before jarvis.config is imported, because the file list is fixed at import time) nor the
+# per-user file. Either may hold a real key.
+os.environ["JARVIS_IGNORE_REPO_ENV"] = "1"
 os.environ["JARVIS_CONFIG_FILE"] = str(Path(tempfile.gettempdir()) / "jarvis-tests-no-such-config" / ".env")
 
 

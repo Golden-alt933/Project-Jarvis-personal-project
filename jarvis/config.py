@@ -34,7 +34,13 @@ def is_checkout() -> bool:
 
 
 def repo_env_file() -> Path | None:
-    """``<repo>/.env`` when running from a checkout, else None."""
+    """``<repo>/.env`` when running from a checkout, else None.
+
+    JARVIS_IGNORE_REPO_ENV=1 turns it off: the test suite sets it so that a developer's
+    real key in the checkout can never leak into a test or change its outcome.
+    """
+    if os.environ.get("JARVIS_IGNORE_REPO_ENV"):
+        return None
     return REPO_ROOT / ".env" if is_checkout() else None
 
 
