@@ -391,7 +391,10 @@ async def test_calendar_event_in_chrome_opens_google_with_utc_and_echoes_the_tim
     res = await errands.create_calendar_event("Design review", "tomorrow 3pm", ctx, end="in 30 minutes")
     assert res.ok, res.content
     got = qs(chrome.opened[0])
-    assert got["text"] == "Design review" and got["dates"] == "20261111T093000Z/20261111T100000Z"  # 15:00 IST = 09:30 UTC
+    start_utc = datetime(2026, 11, 11, 15, 0).astimezone(UTC)  # 15:00 in the machine's own zone
+    stamp = lambda d: d.strftime("%Y%m%dT%H%M%SZ")  # noqa: E731
+    assert got["text"] == "Design review"
+    assert got["dates"] == f"{stamp(start_utc)}/{stamp(start_utc + timedelta(minutes=30))}"
     assert "Wednesday 11 November 2026, 15:00 to 15:30" in res.content and "NOT saved" in res.content
 
 
@@ -405,7 +408,9 @@ async def test_calendar_event_without_chrome_writes_an_ics_and_opens_it(rig):
     assert path.parent == tmp / "Documents" and path.suffix == ".ics" and path.is_file()
     body = path.read_text(encoding="utf-8")
     assert "SUMMARY:Design review" in body and "LOCATION:Room 4" in body and "mailto:a@x.com" in body
-    assert "DTSTART:20261111T093000Z" in body and "DTEND:20261111T103000Z" in body  # default length one hour
+    start_utc = datetime(2026, 11, 11, 15, 0).astimezone(UTC)
+    assert f"DTSTART:{start_utc:%Y%m%dT%H%M%SZ}" in body
+    assert f"DTEND:{start_utc + timedelta(hours=1):%Y%m%dT%H%M%SZ}" in body  # default length one hour
 
 
 async def test_calendar_event_provider_setting_and_errors(rig):

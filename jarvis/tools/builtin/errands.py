@@ -286,7 +286,7 @@ async def open_in_chrome(ctx: ToolContext, url: str) -> str:
 def open_default(url: str) -> str:
     if not plat.current().open_url(url):
         raise OSError("no default application accepted the link")
-    return "in the default application" if not url.lower().startswith(("http://", "https://")) else "in the default browser"
+    return "(default app)" if not url.lower().startswith(("http://", "https://")) else "in the default browser"
 
 
 async def open_web(ctx: ToolContext, url: str, chrome: bool) -> str:
@@ -340,7 +340,7 @@ async def draft_email(
         return _fail(exc)
     names = {"gmail": "Gmail", "outlook": "Outlook", "mailto": "the default mail app"}
     return ToolResult.success(
-        f"Opened a draft in {names[chosen]} {where}: to {', '.join(recipients)}, subject \"{_oneline(subject)}\". "
+        f"Opened a draft in {names[chosen]}{'' if where == '(default app)' else ' ' + where}: to {', '.join(recipients)}, subject \"{_oneline(subject)}\". "
         "It has NOT been sent; the user reviews it and sends it. If the page asks the user to sign in, "
         "tell them so and wait.",
         data={"provider": chosen, "url": url},
@@ -462,6 +462,6 @@ async def compose_message(app: Literal["whatsapp", "telegram", "sms"], to: str, 
     except (ErrandError, OSError) as exc:
         return _fail(exc)
     return ToolResult.success(
-        f"Opened {app} {where} with the message typed in. It has NOT been sent: the user must {todo}.",
+        f"Opened {app} {'' if where == '(default app)' else where + ' '}with the message typed in. It has NOT been sent: the user must {todo}.",
         data={"url": url},
     )
