@@ -204,9 +204,24 @@ Installed with `uv sync --all-extras` (or `--extra office --extra screen`).
 - **Excel:** overview, read ranges, write cells and formulas, append rows, create workbooks, column totals and lookups. Writes to an existing workbook ask first and keep a `.bak`. openpyxl cannot calculate formulas, so a formula's value appears when the file is next opened in Excel.
 - **Screen:** `read_screen_text` runs OCR locally (about 5 s for a 1080p screen). `look_at_screen` and `describe_image` send the image to a vision model. By default that is a hosted model on the configured key, falling back to the local Ollama vision model; set `JARVIS_VISION_PROVIDER=local` to keep images on this machine.
 
+## HUD
+
+A translucent, always-on-top glass interface with a living orb that reacts to the real microphone and speaker levels.
+
+```
+uv sync --extra hud
+uv run jarvis --hud            # HUD with voice
+uv run jarvis --hud --no-voice # HUD, typed requests only
+uv run jarvis --hud-demo       # scripted demo: no microphone, no model
+```
+
+- **Compact** (orb and state word, docked bottom-right) and **expanded** (conversation, tool ticker, confirmation card, CPU/memory/GPU/battery gauges, text input). Click the orb or press **Ctrl+Alt+J** to toggle. **Esc** cancels the current turn. Drag from any empty area; the position and mode are remembered in `hud.json` in the data directory.
+- The tray icon offers Show/Hide, Compact/Expanded, Mute microphone, New conversation, Use local/cloud model, Hide from screenshots and Quit.
+- The window is excluded from screen capture by default, so screenshots Jarvis takes of your screen do not contain the HUD. Turn that off from the tray menu.
+- Risky actions show a confirmation card with Allow and Deny; you can still answer by voice.
+
 ## Roadmap
 
-- A HUD (it will consume the `VoiceEvent`s the voice session already emits)
 - Keyboard and window control for desktop apps
 - Email and calendar
 

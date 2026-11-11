@@ -25,6 +25,14 @@ from typing import Any, Iterator, Literal
 from send2trash import send2trash
 
 from jarvis.tools.base import Risk, ToolResult, tool
+from jarvis.tools.paths import RESERVED_NAMES, bad_path as _bad_path  # noqa: F401  (re-exported)
+from jarvis.tools.paths import decode_text as _decode
+from jarvis.tools.paths import format_size as _fmt_size
+from jarvis.tools.paths import home as _home
+from jarvis.tools.paths import make_backup
+from jarvis.tools.paths import is_binary as _is_binary
+from jarvis.tools.paths import not_found as _missing
+from jarvis.tools.paths import resolve_path, similar_names as _similar_names  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -50,13 +58,6 @@ EXECUTABLE_SUFFIXES = frozenset(
     }
 )
 
-# Windows device names: os.path.exists("NUL") is True and nobody means that.
-RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{i}" for i in range(1, 10)}
-    | {f"LPT{i}" for i in range(1, 10)}
-)
-
 DOCUMENT_HINTS = {
     ".pdf": "a PDF; use the PDF/document tools to read it",
     ".docx": "a Word document; use the document tools to read it",
@@ -74,6 +75,7 @@ BINARY_KINDS = {
     ".dll": "a library", ".pyc": "compiled Python", ".sqlite": "a database", ".db": "a database",
 }
 
+LOCKED_HINT = "The file may be open in another program that locks it. Close it there and try again."
 MAX_READ_BYTES = 20 * 1024 * 1024
 MAX_LINE_CHARS = 2000
 MAX_GREP_BYTES = 2 * 1024 * 1024
@@ -90,25 +92,6 @@ MIN_SCORE = 0.55
 
 
 # --------------------------------------------------------------------- paths
-def _home() -> Path:
-    return Path(os.path.expanduser("~"))
-
-
-def resolve_path(raw: str) -> Path:
-    """Absolute path from ``~``, %VARS%/$VARS, either slash style, or a name relative to home."""
-    text = (raw or "").strip().strip('"').strip("'")
-    if not text:
-        raise ValueError("empty path")
-    expanded = os.path.expanduser(os.path.expandvars(text))
-    path = Path(expanded)
-    # Checked before abspath(), which rewrites device names into odd device paths.
-    if path.name.split(".")[0].upper() in RESERVED_NAMES:
-        raise ValueError(f"'{raw}' is a reserved Windows device name, not a file")
-    if not path.is_absolute() and not path.drive:
-        path = _home() / path
-    return Path(os.path.abspath(path))
-
-
 def _norm(path: Path | str) -> str:
     return os.path.normcase(os.path.realpath(str(path)))
 
@@ -133,50 +116,6 @@ def _protected_reason(path: Path) -> str | None:
     return None
 
 
-def _similar_names(path: Path) -> tuple[Path, list[str]]:
-    """Nearest existing ancestor and up to 3 entries there that resemble the missing name."""
-    missing = path.name
-    parent = path.parent
-    while not parent.exists() and parent.parent != parent:
-        missing = parent.name
-        parent = parent.parent
-    try:
-        names = os.listdir(parent)
-    except OSError:
-        return parent, []
-    close = difflib.get_close_matches(missing, names, n=3, cutoff=0.4)
-    if len(close) < 3:  # substring hits catch spoken partial names
-        low = missing.lower()
-        for n in names:
-            if n not in close and low and low in n.lower():
-                close.append(n)
-            if len(close) == 3:
-                break
-    return parent, close
-
-
-def _missing(path: Path, what: str = "path") -> ToolResult:
-    parent, close = _similar_names(path)
-    if close:
-        hint = f"In {parent} there is: {', '.join(close)}. Use find_files if unsure."
-    else:
-        hint = f"The nearest existing folder is {parent}. Use find_files or list_directory to look around."
-    return ToolResult.fail(f"{what} does not exist: {path}", hint)
-
-
-def _bad_path(exc: ValueError) -> ToolResult:
-    return ToolResult.fail(str(exc), "Give a non-empty path.")
-
-
-def _fmt_size(n: int) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{n} B"
-
-
 def _fmt_time(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
 
@@ -192,24 +131,6 @@ def _stat_line(path: Path) -> str:
 
 
 # ------------------------------------------------------------------ encoding
-def _decode(raw: bytes) -> tuple[str, str]:
-    """Decode text bytes: UTF-16/UTF-8 BOM, then utf-8, then cp1252."""
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16"), "utf-16"
-    if raw.startswith(b"\xef\xbb\xbf"):
-        return raw.decode("utf-8-sig"), "utf-8-sig"
-    try:
-        return raw.decode("utf-8"), "utf-8"
-    except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace"), "cp1252"
-
-
-def _is_binary(raw: bytes) -> bool:
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16 text is full of NULs
-        return False
-    return b"\x00" in raw[:4096]
-
-
 def _encode(text: str, encoding: str) -> bytes:
     if encoding == "utf-8-sig":
         return b"\xef\xbb\xbf" + text.encode("utf-8")
@@ -236,9 +157,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 def _backup(path: Path) -> Path:
-    bak = path.with_name(path.name + ".bak")
-    shutil.copy2(path, bak)
-    return bak
+    return make_backup(path)
 
 
 # -------------------------------------------------------------------- search
@@ -528,6 +447,8 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 400) -> ToolResul
                 "Use search_file_contents to find the part you need, or run_command with Select-Object -First/-Last.",
             )
         raw = target.read_bytes()
+    except PermissionError:
+        return ToolResult.fail(f"cannot read {target}: access denied", LOCKED_HINT)
     except OSError as exc:
         return ToolResult.fail(f"cannot read {target}: {exc.strerror or exc}")
     if suffix in BINARY_KINDS or _is_binary(raw):

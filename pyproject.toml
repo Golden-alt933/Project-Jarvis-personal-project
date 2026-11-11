@@ -39,6 +39,7 @@ voice = [
     "nvidia-cublas-cu12>=12.4,<12.9.3",
     "nvidia-cudnn-cu12>=9.1",
 ]
+hud = ["PyQt6>=6.7", "qasync>=0.27"]
 windows = ["pycaw>=20240210", "comtypes>=1.4", "pywinauto>=0.6.8", "pygetwindow>=0.0.9"]
 
 [project.scripts]

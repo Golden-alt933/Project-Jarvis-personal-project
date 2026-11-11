@@ -6,9 +6,10 @@ files. Rewritten for Jarvis: typed arguments, compact grids with A1 labels inste
 spoken prose, atomic saves with a ``.bak``, and a number parser so the model never does
 arithmetic itself. The xlwings/live-Excel path is intentionally absent.
 
-openpyxl cannot calculate formulas. Saving a workbook with it drops the cached value of
-every formula, so after a write those cells read as "(uncalculated)" until Excel opens
-and saves the file. Every write result says so.
+openpyxl cannot calculate formulas, and saving a workbook with it drops the cached value of
+every formula. After a write that leaves formulas, the file is recalculated by a private hidden
+Excel when one is installed (``excel_calc``); otherwise, and for reading files that have no
+stored results, ``excel_eval`` computes the values and the output says so.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import tempfile
 import unicodedata
 import zipfile
@@ -30,7 +30,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
 from jarvis.tools.base import Risk, ToolResult, tool
-from jarvis.tools.builtin.files import resolve_path
+from jarvis.tools import excel_calc
+from jarvis.tools.excel_eval import Evaluator, XlError
+from jarvis.tools.paths import known_folder, make_backup, not_found, resolve_path
 
 log = logging.getLogger(__name__)
 
@@ -239,9 +241,30 @@ class _Sheet:
         return self.max_row == 0 or self.max_col == 0
 
 
+class _XlsxSource:
+    """Gives the formula evaluator access to a workbook loaded twice (values and formulas)."""
+
+    def __init__(self, values: Any, formulas: Any) -> None:
+        self.values, self.formulas = values, formulas
+        self._names = {n.casefold(): n for n in formulas.sheetnames}
+
+    def dims(self, sheet: str) -> tuple[int, int] | None:
+        name = self._names.get(sheet.casefold())
+        return None if name is None else (self.formulas[name].max_row, self.formulas[name].max_column)
+
+    def cell(self, sheet: str, row: int, col: int) -> tuple[Any, Any]:
+        name = self._names[sheet.casefold()]
+        return (
+            _formula_text(self.formulas[name].cell(row=row, column=col).value),
+            self.values[name].cell(row=row, column=col).value,
+        )
+
+
 class _XlsxSheet(_Sheet):
-    def __init__(self, vals: Any, fmls: Any) -> None:
-        self.vals, self.fmls, self.name = vals, fmls, vals.title
+    def __init__(self, vals: Any, fmls: Any, calc: Evaluator | None = None) -> None:
+        self.vals, self.fmls, self.name, self.calc = vals, fmls, vals.title, calc
+        self.computed: set[tuple[int, int]] = set()  # (row, col) values calculated by Jarvis
+        self.unsupported: dict[tuple[int, int], str] = {}  # (row, col) -> function not supported
         self.hidden = vals.sheet_state != "visible"
         self.tables = [(t.name, t.ref) for t in getattr(fmls, "tables", {}).values()]
         self.max_row, self.max_col = vals.max_row, vals.max_column
@@ -254,9 +277,25 @@ class _XlsxSheet(_Sheet):
         if formulas:
             return [[_formula_text(v) for v in row] for row in f_rows]
         out: list[list[Any]] = []
-        for v_row, f_row in zip(self.vals.iter_rows(**kw), f_rows):
-            out.append([NO_CACHE if v is None and _is_formula(f) else v for v, f in zip(v_row, f_row)])
+        for i, (v_row, f_row) in enumerate(zip(self.vals.iter_rows(**kw), f_rows)):
+            out.append(
+                [
+                    self._calculate(r1 + i, c1 + j) if v is None and _is_formula(f) else v
+                    for j, (v, f) in enumerate(zip(v_row, f_row))
+                ]
+            )
         return out
+
+    def _calculate(self, row: int, col: int) -> Any:
+        """Value of a formula cell that has no stored result, or NO_CACHE if it cannot be computed."""
+        if self.calc is None:
+            return NO_CACHE
+        result = self.calc.value(self.name, row, col)
+        if isinstance(result, XlError) and result == "#NAME?" and result.detail:
+            self.unsupported[(row, col)] = result.detail
+            return NO_CACHE
+        self.computed.add((row, col))
+        return result
 
 
 class _CsvSheet(_Sheet):
@@ -334,7 +373,8 @@ def _read_xlsx(path: Path) -> _Book:
     except BaseException:
         formulas.close()
         raise
-    sheets = [_XlsxSheet(values[n], formulas[n]) for n in formulas.sheetnames]
+    calc = Evaluator(_XlsxSource(values, formulas))
+    sheets = [_XlsxSheet(values[n], formulas[n], calc) for n in formulas.sheetnames]
     macros = path.suffix.lower() == ".xlsm" or _zip_has(path, "xl/vbaProject.bin")
     book = _Book(path, path.suffix.lower().lstrip("."), sheets, formulas.active.title, macros)
     book._closers = [formulas.close, values.close]
@@ -350,23 +390,6 @@ def _zip_has(path: Path, *prefixes: str) -> bool:
 
 
 # ------------------------------------------------------------ path / open glue
-def _missing(path: Path) -> ToolResult:
-    parent = path.parent
-    while not parent.exists() and parent.parent != parent:
-        parent = parent.parent
-    try:
-        names = os.listdir(parent)
-    except OSError:
-        names = []
-    close = difflib.get_close_matches(path.name, names, n=3, cutoff=0.4)
-    hint = (
-        f"In {parent} there is: {', '.join(close)}. Use find_files if unsure."
-        if close
-        else f"The nearest existing folder is {parent}. Use find_files to look for the file."
-    )
-    return ToolResult.fail(f"file does not exist: {path}", hint)
-
-
 def _suffix_problem(path: Path, allowed: set[str], action: str) -> ToolResult | None:
     suffix = path.suffix.lower()
     if suffix in allowed:
@@ -393,7 +416,7 @@ def _locate(raw: str) -> Path | ToolResult:
     except ValueError as exc:
         return ToolResult.fail(str(exc), "Give a non-empty file path.")
     if not path.exists():
-        return _missing(path)
+        return not_found(path, "file")
     if path.is_dir():
         return ToolResult.fail(f"{path} is a folder", "Give the path of the workbook file.")
     if (problem := _suffix_problem(path, READ_SUFFIXES, "read")) is not None:
@@ -455,8 +478,16 @@ def _cell_text(value: Any) -> str:
     return text if len(text) <= MAX_CELL_CHARS else text[: MAX_CELL_CHARS - 1] + "…"
 
 
-def _render(rows: list[tuple[int, list[Any]]], c1: int, budget: int = OUTPUT_BUDGET) -> tuple[str, int]:
-    """Grid with column letters on top and row numbers on the left. Returns (text, rows shown)."""
+def _render(
+    rows: list[tuple[int, list[Any]]],
+    c1: int,
+    budget: int = OUTPUT_BUDGET,
+    computed: set[tuple[int, int]] | None = None,
+) -> tuple[str, int]:
+    """Grid with column letters on top and row numbers on the left. Returns (text, rows shown).
+
+    Cells whose (row, col) is in ``computed`` get a trailing ``*``: calculated by Jarvis.
+    """
     if not rows:
         return "", 0
     width = len(rows[0][1])
@@ -464,13 +495,32 @@ def _render(rows: list[tuple[int, list[Any]]], c1: int, budget: int = OUTPUT_BUD
     lines = [" " * label_w + " | " + " | ".join(col_letter(c1 + i) for i in range(width))]
     used, shown = len(lines[0]), 0
     for number, values in rows:
-        line = f"{number:>{label_w}} | " + " | ".join(_cell_text(v) for v in values)
+        cells = [
+            _cell_text(v) + ("*" if computed and (number, c1 + i) in computed else "")
+            for i, v in enumerate(values)
+        ]
+        line = f"{number:>{label_w}} | " + " | ".join(cells)
         if shown and used + len(line) > budget:
             break
         lines.append(line)
         used += len(line) + 1
         shown += 1
     return "\n".join(lines), shown
+
+
+def _marks(sheet: _Sheet) -> set[tuple[int, int]]:
+    return getattr(sheet, "computed", set())
+
+
+def _unsupported_names(sheet: _Sheet) -> str:
+    return ", ".join(sorted(set(getattr(sheet, "unsupported", {}).values())))
+
+
+def _computed_note(count: int) -> str:
+    return (
+        f"{count} value(s) marked * were calculated by Jarvis's built-in formula evaluator because the "
+        "file stores no results for them; they equal Excel's for the supported functions."
+    )
 
 
 def _dims(sheet: _Sheet) -> str:
@@ -533,7 +583,8 @@ def excel_overview(path: str) -> ToolResult:
             total_f, total_u = total_f + f, total_u + u
             blocks.append(_sheet_overview(sheet, f))
         flags = [
-            f"formulas: {total_f}" + (f" ({total_u} with no cached value: never calculated by Excel)" if total_u else "")
+            f"formulas: {total_f}"
+            + (f" ({total_u} with no cached value: never calculated by Excel; Jarvis calculates them when read)" if total_u else "")
             if total_f
             else "formulas: none",
             "macros: yes" if book.has_macros else "macros: no",
@@ -563,9 +614,11 @@ def _sheet_overview(sheet: _Sheet, formulas: int) -> str:
         lines.append("  tables: " + ", ".join(f"{n} ({ref})" for n, ref in sheet.tables))
     cols = min(sheet.max_col, 12)
     preview = sheet.block(1, 1, min(sheet.max_row, 5), cols)
-    text, _ = _render([(i + 1, r) for i, r in enumerate(preview)], 1)
+    text, _ = _render([(i + 1, r) for i, r in enumerate(preview)], 1, computed=_marks(sheet))
     lines.append("  first rows:" + ("" if cols == sheet.max_col else f" (first {cols} of {sheet.max_col} columns)"))
     lines.extend("    " + ln for ln in text.splitlines())
+    if any(r <= 5 and c <= cols for r, c in _marks(sheet)):
+        lines.append("    (* = calculated by Jarvis; the file stores no result)")
     return "\n".join(lines)
 
 
@@ -627,9 +680,12 @@ def _read_result(
     last_col = min(c2, c1 + MAX_SHOWN_COLS - 1)
     end_row = min(r2, r1 + max_rows - 1)
     data = sheet.block(r1, c1, end_row, last_col, formulas)
-    text, shown = _render([(r1 + i, row) for i, row in enumerate(data)], c1)
+    text, shown = _render([(r1 + i, row) for i, row in enumerate(data)], c1, computed=_marks(sheet))
     shown_last = r1 + shown - 1
     uncalculated = sum(v is NO_CACHE for row in data[:shown] for v in row)
+    calculated = 0 if formulas else sum(
+        r1 <= r < r1 + shown and c1 <= c <= last_col for r, c in _marks(sheet)
+    )
     head = f"Sheet '{sheet.name}' {col_letter(c1)}{r1}:{col_letter(last_col)}{shown_last}"
     head += f" of used area {_dims(sheet)}" + (" (range clipped to used area)" if clipped else "")
     notes = []
@@ -639,10 +695,14 @@ def _read_result(
     if last_col < c2:
         nxt = f"{col_letter(last_col + 1)}{r1}:{col_letter(c2)}{r2}"
         notes.append(f"{c2 - last_col} more columns not shown; call again with cell_range='{nxt}'.")
+    if calculated:
+        notes.append(_computed_note(calculated))
     if uncalculated:
+        names = _unsupported_names(sheet)
+        why = f" Jarvis cannot calculate {names}." if names else ""
         notes.append(
             f"{uncalculated} formula cell(s) show (uncalculated): no value is stored because the file was "
-            "never calculated by Excel (or was last saved by a script). Use formulas=True to see the "
+            f"never calculated by Excel (or was last saved by a script).{why} Use formulas=True to see the "
             "formulas; values appear once the file is opened and saved in Excel."
         )
     return ToolResult.success("\n".join([head, text, *notes]), data={"rows_shown": shown})
@@ -730,8 +790,7 @@ def _atomic_save(wb: Any, path: Path) -> Path | None:
     try:
         wb.save(tmp)
         if path.exists():
-            bak = path.with_name(path.name + ".bak")
-            shutil.copy2(path, bak)
+            bak = make_backup(path)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -740,6 +799,55 @@ def _atomic_save(wb: Any, path: Path) -> Path | None:
             pass
         raise
     return bak
+
+
+MAX_REPORTED_FORMULAS = 12
+
+
+def _recalc_reason(recalc: excel_calc.Recalc) -> str:
+    return {
+        "unavailable": f"{recalc.detail}, so the workbook was not recalculated",
+        "locked": f"{recalc.detail}, so it was not recalculated (close it and write again to store values)",
+    }.get(recalc.status, f"Excel recalculation did not complete ({recalc.detail}); the file is saved as written")
+
+
+def _formula_report(
+    path: Path,
+    cells: list[tuple[str, str]],
+    recalc: excel_calc.Recalc,
+    n_formulas: int,
+    qualify: bool = False,
+) -> str:
+    """Sentence(s) saying how the formulas just written were calculated, with their values."""
+    shown = cells[:MAX_REPORTED_FORMULAS]
+    values: list[str] = []
+    try:
+        book = _open_book(path)
+    except _OpenError:
+        book = None
+    if book is not None:
+        try:
+            for sheet_name, ref in shown:
+                sheet = book.get(sheet_name)
+                row, col = parse_cell(ref)
+                value = sheet.block(row, col, row, col)[0][0] if sheet else NO_CACHE
+                label = f"{sheet_name}!{ref}" if qualify else ref
+                text = _cell_text(value)
+                if value is NO_CACHE and sheet is not None:
+                    names = getattr(sheet, "unsupported", {}).get((row, col))
+                    text = f"(uncalculated: {names} is not supported)" if names else text
+                values.append(f"{label} = {text}")
+        finally:
+            book.close()
+    listing = ", ".join(values) + (f" and {len(cells) - len(shown)} more" if len(cells) > len(shown) else "")
+    if recalc.ok:
+        head = f"Excel recalculated the workbook ({n_formulas} formula cell(s)); stored values are now current."
+        return head + (f" Calculated: {listing}." if listing else "")
+    head = f"{_recalc_reason(recalc)}."
+    tail = (
+        f" Calculated by Jarvis's built-in evaluator: {listing}." if listing else ""
+    ) + " Excel will store the values the next time the file is opened and saved there; Jarvis calculates them on read until then."
+    return head + tail
 
 
 def _fidelity_note(path: Path) -> str:
@@ -811,11 +919,8 @@ def _modify(raw_path: str, sheet: str, mutate: Callable[[Any], tuple[str, dict[s
 
     parts = [f"{summary} in sheet '{sheet}' of {path.name}.", *notes]
     if n_formulas:
-        parts.append(
-            f"openpyxl cannot calculate formulas: the workbook has {n_formulas} formula cell(s) and their "
-            "values will appear when the file is next opened in Excel. Reading them before then shows "
-            "(uncalculated), not a number."
-        )
+        recalc = excel_calc.recalculate(path)
+        parts.append(_formula_report(path, [(sheet, r) for r in data.get("formulas", [])], recalc, n_formulas))
     if bak:
         parts.append(f"Previous version kept at {bak}.")
     text = " ".join(parts) + (_fidelity_note(path) if existed else "")
@@ -829,8 +934,9 @@ def excel_write(path: str, sheet: str, cells: dict[str, str | int | float | bool
     "C2": "=B2*1.18"}. A string starting with "=" is stored as a formula (English function
     names, comma separators). null clears a cell. Creates the sheet, and the file if it does
     not exist. Existing formatting and other sheets are kept and the previous file is saved
-    as .bak. Needs user approval when the file exists. Formulas are NOT calculated: their
-    values appear when the file is next opened in Excel. Fails if the file is open in Excel.
+    as .bak. Needs user approval when the file exists. After writing formulas the file is
+    recalculated with Excel when it is installed, and the result lists the calculated values.
+    Fails if the file is open in Excel.
 
     Args:
         path: Workbook to modify (.xlsx or .xlsm). .xls is not supported.
@@ -889,7 +995,7 @@ def excel_append_rows(
     """Add rows below the last used row of a sheet, starting at column A. Strings starting
     with "=" are formulas. Creates the sheet (and file) if missing. Keeps formatting and
     other sheets, saves the previous file as .bak, needs user approval when the file exists.
-    Formula values appear when the file is next opened in Excel. Fails if open in Excel.
+    Formulas are recalculated with Excel when installed. Fails if open in Excel.
 
     Args:
         path: Workbook to modify (.xlsx or .xlsm).
@@ -913,26 +1019,21 @@ def excel_append_rows(
 
     def mutate(ws: Any) -> tuple[str, dict[str, Any]]:
         start = _last_used_row(ws) + 1
+        formulas: list[str] = []
         for i, row in enumerate(rows):
             for j, value in enumerate(row, 1):
                 if value is not None:
                     ws.cell(row=start + i, column=j).value = value
+                    if isinstance(value, str) and value.startswith("="):
+                        formulas.append(f"{col_letter(j)}{start + i}")
         width = max(1, max(len(r) for r in rows))
         span = f"A{start}:{col_letter(width)}{start + len(rows) - 1}"
-        return f"Appended {len(rows)} row{'s' * (len(rows) != 1)} at {span}", {"range": span}
+        return f"Appended {len(rows)} row{'s' * (len(rows) != 1)} at {span}", {"range": span, "formulas": formulas}
 
     return _modify(path, sheet, mutate)
 
 
 # ------------------------------------------------------------------- excel_create
-def _documents_dir() -> Path:
-    home = Path(os.path.expanduser("~"))
-    for candidate in (home / "Documents", home / "OneDrive" / "Documents"):
-        if candidate.is_dir():
-            return candidate
-    return home / "Documents"
-
-
 def _display_width(value: Any) -> int:
     text = _cell_text(value).split("\n")[0]
     return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
@@ -974,7 +1075,7 @@ def excel_create(
 ) -> ToolResult:
     """Create a new .xlsx workbook from rows of values, one list of rows per sheet name. With
     header_style the first row of each sheet is bold and frozen, and columns get sensible widths.
-    Strings starting with "=" become formulas (not calculated until opened in Excel). Never
+    Strings starting with "=" become formulas (calculated with Excel when installed). Never
     overwrites an existing file. A bare file name (no folder) is saved in the Documents folder.
 
     Args:
@@ -992,7 +1093,7 @@ def excel_create(
     if not raw:
         return ToolResult.fail("empty path", "Give a file name like budget.xlsx.")
     try:
-        target = _documents_dir() / raw if Path(raw).name == raw else resolve_path(raw)
+        target = known_folder("Documents") / raw if Path(raw).name == raw else resolve_path(raw)
     except ValueError as exc:
         return ToolResult.fail(str(exc), "Give a valid file name.")
     if not target.suffix:
@@ -1049,10 +1150,17 @@ def excel_create(
                 os.unlink(tmp)
             except OSError:
                 pass
-    has_formula = any(_is_formula(v) for rs in sheets.values() for r in rs for v in r)
+    formula_cells = [
+        (name, f"{col_letter(j)}{i}")
+        for name, rows in sheets.items()
+        for i, row in enumerate(rows, 1)
+        for j, v in enumerate(row, 1)
+        if _is_formula(v)
+    ]
     msg = f"Created {target} with {len(sheets)} sheet(s) ({', '.join(sheets)}) and {total_rows} row(s)."
-    if has_formula:
-        msg += " Formula values will appear when the file is first opened in Excel (not calculated here)."
+    if formula_cells:
+        recalc = excel_calc.recalculate(target)
+        msg += " " + _formula_report(target, formula_cells, recalc, len(formula_cells), qualify=len(sheets) > 1)
     return ToolResult.success(msg, data=str(target))
 
 
@@ -1168,6 +1276,11 @@ def _aggregate(sheet: _Sheet, col: int, first: int, operation: str, src: str) ->
         else:
             texts.append((row, value))
     skipped = _skipped_note(texts, col, uncalc, errors, empty, percents)
+    calculated = sum(1 for r, c in _marks(sheet) if c == col and r >= first)
+    if calculated:
+        skipped += f" {calculated} formula value(s) in this column were calculated by Jarvis (the file stores no results)."
+    if uncalc and _unsupported_names(sheet):
+        skipped += f" Jarvis cannot calculate: {_unsupported_names(sheet)}."
     if operation == "count":
         filled = len(numbers) + len(texts) + errors + uncalc
         return ToolResult.success(f"Count of filled cells in {src}: {filled}.{skipped}", data={"count": filled})

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from jarvis.tools.base import ToolContext, ToolResult, tool
-from jarvis.tools.builtin.files import resolve_path
+from jarvis.tools.paths import not_found, resolve_path
 from jarvis.vision.capture import (
     FULL_RES,
     CaptureError,
@@ -184,8 +184,10 @@ async def describe_image(path: str, question: str = "Describe this image.", ctx:
             f"unsupported image type '{file.suffix or '(none)'}'",
             f"Supported: {', '.join(sorted(IMAGE_SUFFIXES))}.",
         )
+    if not file.exists():
+        return not_found(file, "file")
     if not file.is_file():
-        return ToolResult.fail(f"{file} does not exist")
+        return ToolResult.fail(f"{file} is not a file")
     if file.stat().st_size > MAX_IMAGE_BYTES:
         return ToolResult.fail(f"{file.name} is larger than {MAX_IMAGE_BYTES // (1024 * 1024)} MB")
     try:

@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     temperature: float = Field(0.3, alias="JARVIS_TEMPERATURE")
     max_output_tokens: int = Field(4096, alias="JARVIS_MAX_OUTPUT_TOKENS")
     request_timeout: float = Field(90.0, alias="JARVIS_REQUEST_TIMEOUT")
+    # A streaming request that produces no bytes for this long is abandoned and retried
+    # once (free-tier requests sometimes queue forever). 0 disables.
+    first_byte_timeout: float = Field(25.0, alias="JARVIS_FIRST_BYTE_TIMEOUT")
+    # Optional faster model for the voice/HUD frontends (same provider). Empty = same as text.
+    voice_model: str = Field("", alias="JARVIS_VOICE_MODEL")
 
     nvidia_api_key: str = Field("", alias="NVIDIA_API_KEY")
     groq_api_key: str = Field("", alias="GROQ_API_KEY")
@@ -45,6 +50,8 @@ class Settings(BaseSettings):
     ollama_model: str = Field("qwen3:4b-instruct", alias="OLLAMA_MODEL")
     ollama_num_ctx: int = Field(16384, alias="OLLAMA_NUM_CTX")
     local_fallback: bool = Field(True, alias="JARVIS_LOCAL_FALLBACK")
+    # Start `ollama serve` (loopback only, once per process) when it is not running.
+    ollama_autostart: bool = Field(True, alias="JARVIS_OLLAMA_AUTOSTART")
 
     # Agent
     user_name: str = Field("", alias="JARVIS_USER_NAME")

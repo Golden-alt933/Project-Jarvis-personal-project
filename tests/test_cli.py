@@ -201,10 +201,10 @@ def test_local_and_cloud_switch(tmp_path: Path) -> None:
         console = recording_console()
         commands = cli.SlashCommands(app, console)
         commands.dispatch("/local")
-        assert app.agent._force_local is True
+        assert app.agent.using_local is True and app.agent._force_local is True
         assert "qwen3" in console.export_text()
         commands.dispatch("/cloud")
-        assert app.agent._force_local is False
+        assert app.agent.using_local is False
     finally:
         app.close()
 

@@ -6,6 +6,8 @@ by feeding it fake chunks (SDK objects or plain dicts).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -118,6 +120,7 @@ class ChunkAssembler:
         self._calls: dict[int, dict[str, str]] = {}
         self._finish: str | None = None
         self._usage: Usage | None = None
+        self.reasoning_chars = 0
 
     def feed(self, chunk: Any) -> list[str]:
         """Consume one chunk; return visible text deltas (possibly empty)."""
@@ -135,7 +138,11 @@ class ChunkAssembler:
             if _get(choice, "finish_reason"):
                 self._finish = _get(choice, "finish_reason")
             delta = _get(choice, "delta")
-            # reasoning_content / reasoning deltas are deliberately never read.
+            # Reasoning models stream their chain of thought in a separate field. It is
+            # counted (diagnostics only) and never becomes text or part of the reply.
+            self.reasoning_chars += len(
+                _get(delta, "reasoning_content") or _get(delta, "reasoning") or ""
+            )
             content = _get(delta, "content")
             if content:
                 visible = self._think.feed(content)
@@ -228,6 +235,33 @@ def map_openai_error(exc: Exception, secret: str = "") -> LLMError:
     return LLMUnavailable(f"Unexpected provider failure: {type(exc).__name__}")
 
 
+_END = object()
+
+
+class _FirstByteTimeout(Exception):
+    """Internal: nothing arrived from the provider within the first-byte window."""
+
+
+def completion_to_chunk(resp: Any) -> dict[str, Any]:
+    """Re-express a non-streaming completion as one streaming chunk so the same
+    assembler (think-stripping, tool-call repair, reasoning handling) serves both modes."""
+    data = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
+    choices = []
+    for choice in data.get("choices") or []:
+        message = choice.get("message") or {}
+        calls = [
+            {"index": i, "id": c.get("id"), "function": c.get("function") or {}}
+            for i, c in enumerate(message.get("tool_calls") or [])
+        ]
+        delta = {
+            "content": message.get("content"),
+            "reasoning_content": message.get("reasoning_content") or message.get("reasoning"),
+            "tool_calls": calls,
+        }
+        choices.append({"delta": delta, "finish_reason": choice.get("finish_reason")})
+    return {"choices": choices, "usage": data.get("usage"), "model": data.get("model")}
+
+
 class OpenAICompatClient:
     is_local = False
 
@@ -239,11 +273,25 @@ class OpenAICompatClient:
         model: str,
         context_window: int,
         request_timeout: float = 90.0,
+        *,
+        first_byte_timeout: float = 0.0,
+        extra_body: dict[str, Any] | None = None,
+        extra_params: dict[str, Any] | None = None,
+        streaming: bool = True,
     ) -> None:
+        """`extra_body` is merged into the JSON body (provider-specific fields such as
+        reasoning_effort); `extra_params` are SDK keyword arguments (top_p, ...).
+        `first_byte_timeout` (seconds, 0 = off): a streaming request that has produced no
+        data by then is abandoned and retried once. `streaming=False` makes stream() do one
+        plain request and emit the content as a single delta."""
         self.name = name
         self.model = model
         self.context_window = context_window
+        self.streaming = streaming
         self._api_key = api_key
+        self._first_byte_timeout = first_byte_timeout
+        self._extra_body = dict(extra_body or {})
+        self._extra_params = dict(extra_params or {})
         self._client = openai.AsyncOpenAI(
             base_url=base_url,
             api_key=api_key or "not-needed",
@@ -261,7 +309,7 @@ class OpenAICompatClient:
         req: dict[str, Any] = {
             "model": self.model,
             "messages": build_payload_messages(messages),
-            "stream": True,
+            "stream": self.streaming,
         }
         if tools:
             req["tools"] = tools
@@ -269,6 +317,9 @@ class OpenAICompatClient:
             req["max_tokens"] = max_tokens
         if temperature is not None:
             req["temperature"] = temperature
+        req.update(self._extra_params)
+        if self._extra_body:
+            req["extra_body"] = dict(self._extra_body)
         return req
 
     async def _open(self, req: dict[str, Any]) -> Any:
@@ -280,6 +331,63 @@ class OpenAICompatClient:
             log.info("%s rejected stream_options; retrying without (%s)", self.name, exc.status_code)
         return await self._client.chat.completions.create(**req)
 
+    async def _open_and_first(self, req: dict[str, Any], opened: list[Any]) -> tuple[Any, Any]:
+        response = await self._open(req)
+        opened.append(response)
+        iterator = response.__aiter__()
+        return iterator, await anext(iterator, _END)
+
+    async def _first_chunk(self, req: dict[str, Any]) -> tuple[Any, Any]:
+        """Open the stream and read its first chunk, bounded by the first-byte timeout."""
+        opened: list[Any] = []
+        work = self._open_and_first(req, opened)
+        if self._first_byte_timeout <= 0:
+            return await work
+        try:
+            return await asyncio.wait_for(work, self._first_byte_timeout)
+        except asyncio.TimeoutError:
+            for response in opened:
+                with contextlib.suppress(Exception):
+                    await response.close()
+            raise _FirstByteTimeout from None
+
+    async def _stream_once(self, req: dict[str, Any]) -> AsyncIterator[StreamEvent]:
+        assembler = ChunkAssembler(self.model)
+        try:
+            iterator, chunk = await self._first_chunk(req)
+            while chunk is not _END:
+                for text in assembler.feed(chunk):
+                    yield TextDelta(text)
+                chunk = await anext(iterator, _END)
+        except openai.OpenAIError as exc:
+            raise map_openai_error(exc, self._api_key) from None
+        tail, final = assembler.finish()
+        for text in tail:
+            yield TextDelta(text)
+        self._note_empty(final, assembler)
+        yield ResponseDone(final)
+
+    async def _single_request(self, req: dict[str, Any]) -> AsyncIterator[StreamEvent]:
+        assembler = ChunkAssembler(self.model)
+        try:
+            resp = await self._client.chat.completions.create(**req)
+        except openai.OpenAIError as exc:
+            raise map_openai_error(exc, self._api_key) from None
+        deltas = assembler.feed(completion_to_chunk(resp))
+        tail, final = assembler.finish()
+        text = "".join([*deltas, *tail])
+        if text:
+            yield TextDelta(text)
+        self._note_empty(final, assembler)
+        yield ResponseDone(final)
+
+    def _note_empty(self, final: LLMResponse, assembler: ChunkAssembler) -> None:
+        if not final.content and not final.tool_calls and assembler.reasoning_chars:
+            log.warning(
+                "%s produced only reasoning (%d chars, finish=%s); the reply is empty",
+                self.model, assembler.reasoning_chars, final.finish_reason,
+            )
+
     async def stream(
         self,
         messages: list[Message],
@@ -289,18 +397,25 @@ class OpenAICompatClient:
         temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         req = self._request(messages, tools, max_tokens, temperature)
-        assembler = ChunkAssembler(self.model)
-        try:
-            response = await self._open(req)
-            async for chunk in response:
-                for text in assembler.feed(chunk):
-                    yield TextDelta(text)
-        except openai.OpenAIError as exc:
-            raise map_openai_error(exc, self._api_key) from None
-        tail, final = assembler.finish()
-        for text in tail:
-            yield TextDelta(text)
-        yield ResponseDone(final)
+        if not self.streaming:
+            async for event in self._single_request(req):
+                yield event
+            return
+        for attempt in (1, 2):
+            yielded = False
+            try:
+                async for event in self._stream_once(req):
+                    yielded = True
+                    yield event
+                return
+            except _FirstByteTimeout:
+                # Raised only before the first chunk, so `yielded` is always False here;
+                # the guard keeps a retry from ever duplicating output.
+                if yielded or attempt == 2:
+                    raise LLMUnavailable(
+                        f"{self.name} did not respond within {self._first_byte_timeout:g}s."
+                    ) from None
+                log.warning("%s sent nothing for %gs; retrying once", self.name, self._first_byte_timeout)
 
     async def complete(
         self,

@@ -144,3 +144,7 @@ class LLMClient(Protocol):
     ) -> LLMResponse:
         """Non-streaming convenience wrapper around stream()."""
         ...
+
+
+class ConfigError(Exception):
+    """Settings are missing or inconsistent; the message says what to set."""

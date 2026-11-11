@@ -119,6 +119,11 @@ class Agent:
             return
         self._force_local = on
 
+    @property
+    def using_local(self) -> bool:
+        """True when the local model is forced for new turns."""
+        return self._force_local
+
     def cancel(self) -> None:
         self._cancel.set()
 

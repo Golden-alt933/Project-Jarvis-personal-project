@@ -3,9 +3,18 @@ the shim ignores num_ctx, which silently truncates long prompts."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 
@@ -26,6 +35,108 @@ from jarvis.llm.types import (
 log = logging.getLogger(__name__)
 
 _NOT_RUNNING = "Ollama is not running (or not reachable at {url}). Start it with `ollama serve`."
+_START_FAILED = "Ollama is not running at {url} and could not be started automatically ({why}). Start it with `ollama serve`."
+# A cold `ollama serve` took 15-25 s to answer /api/tags on this machine (measured 2026-11-11).
+_STARTUP_WAIT = 30.0  # seconds to wait for a freshly launched server to answer /api/tags
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+class _AutostartState:
+    """Process-wide: the server is launched at most once, however many clients exist."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.attempted = False
+        self.launched = False
+        self.failure = ""
+
+
+_autostart = _AutostartState()
+
+
+class _Refused(LLMUnavailable):
+    """The connection was refused: nothing was sent or received."""
+
+
+def is_loopback_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
+def find_ollama_exe() -> str | None:
+    found = shutil.which("ollama")
+    if found:
+        return found
+    local = os.environ.get("LOCALAPPDATA", "")
+    candidate = Path(local) / "Programs" / "Ollama" / "ollama.exe" if local else None
+    return str(candidate) if candidate and candidate.is_file() else None
+
+
+def launch_ollama_serve(exe: str) -> None:
+    """Start `ollama serve` detached, without a console window. Never killed by us."""
+    kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(
+        [exe, "serve"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        **kwargs,
+    )
+
+
+async def server_responds(base_url: str, timeout: float = 1.5) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return (await client.get(f"{base_url}/api/tags")).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+async def _wait_until_up(base_url: str, deadline: float) -> bool:
+    while time.monotonic() < deadline:
+        if await server_responds(base_url):
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def ensure_ollama_running(base_url: str) -> bool:
+    """Try (once per process) to start a loopback Ollama server; True when it answers.
+
+    Returns False without side effects for a non-loopback URL. After the one attempt,
+    `_autostart.failure` says why it did not work.
+    """
+    if not is_loopback_url(base_url):
+        return False
+    with _autostart.lock:
+        first = not _autostart.attempted
+        _autostart.attempted = True
+        if first:
+            exe = find_ollama_exe()
+            if exe is None:
+                _autostart.failure = "ollama.exe was not found on PATH or in %LOCALAPPDATA%\\Programs\\Ollama"
+            else:
+                try:
+                    launch_ollama_serve(exe)
+                    _autostart.launched = True
+                except OSError as exc:
+                    _autostart.failure = f"launching it failed: {exc.__class__.__name__}"
+    if not _autostart.launched:
+        return False
+    if await _wait_until_up(base_url, time.monotonic() + _STARTUP_WAIT):
+        log.info("Started the Ollama server")
+        return True
+    _autostart.failure = f"it did not answer within {_STARTUP_WAIT:g}s"
+    return False
 
 
 def message_to_ollama(m: Message) -> dict[str, Any]:
@@ -109,12 +220,23 @@ class OllamaClient:
         num_ctx: int,
         request_timeout: float = 90.0,
         keep_alive: str = "30m",
+        autostart: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.context_window = num_ctx
         self._keep_alive = keep_alive
+        self._autostart = autostart
+        self._transport: httpx.AsyncBaseTransport | None = None  # tests inject a mock
         self._timeout = httpx.Timeout(request_timeout, connect=5.0)
+
+    def _unreachable(self) -> LLMUnavailable:
+        if self._autostart and is_loopback_url(self.base_url) and _autostart.failure:
+            return LLMUnavailable(_START_FAILED.format(url=self.base_url, why=_autostart.failure))
+        return LLMUnavailable(_NOT_RUNNING.format(url=self.base_url))
+
+    async def _revive(self) -> bool:
+        return self._autostart and await ensure_ollama_running(self.base_url)
 
     def _body(
         self,
@@ -148,9 +270,21 @@ class OllamaClient:
         temperature: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         body = self._body(messages, tools, max_tokens, temperature)
+        try:
+            async for event in self._attempt(body):
+                yield event
+            return
+        except _Refused:
+            # Connection refused happens before any output, so retrying cannot duplicate text.
+            if not await self._revive():
+                raise self._unreachable() from None
+        async for event in self._attempt(body):
+            yield event
+
+    async def _attempt(self, body: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         assembler = NDJSONAssembler(self.model)
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
                 async with client.stream("POST", f"{self.base_url}/api/chat", json=body) as resp:
                     if resp.status_code >= 400:
                         await self._raise_status(resp)
@@ -165,7 +299,7 @@ class OllamaClient:
                         for text in assembler.feed(obj):
                             yield TextDelta(text)
         except (httpx.ConnectError, httpx.ConnectTimeout):
-            raise LLMUnavailable(_NOT_RUNNING.format(url=self.base_url)) from None
+            raise _Refused(_NOT_RUNNING.format(url=self.base_url)) from None
         except httpx.TimeoutException:
             raise LLMUnavailable("Ollama timed out (model may still be loading).") from None
         except httpx.HTTPError as exc:
@@ -208,13 +342,23 @@ class OllamaClient:
                 return event.response
         raise LLMUnavailable("Stream ended without a response.")
 
+    async def _pulled_models(self) -> set[str]:
+        async with httpx.AsyncClient(timeout=2.0, transport=self._transport) as client:
+            resp = await client.get(f"{self.base_url}/api/tags")
+        resp.raise_for_status()
+        return {m.get("name", "") for m in resp.json().get("models", [])}
+
     async def is_available(self) -> bool:
         """True when Ollama answers and the configured model is pulled."""
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"{self.base_url}/api/tags")
-            resp.raise_for_status()
-            names = {m.get("name", "") for m in resp.json().get("models", [])}
+            names = await self._pulled_models()
+        except httpx.ConnectError:
+            if not await self._revive():
+                return False
+            try:
+                names = await self._pulled_models()
+            except (httpx.HTTPError, ValueError):
+                return False
         except (httpx.HTTPError, ValueError):
             return False
         wanted = self.model if ":" in self.model else f"{self.model}:latest"

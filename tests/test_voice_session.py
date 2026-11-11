@@ -21,16 +21,23 @@ from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.tools.base import ToolResult
 from jarvis.voice import session as vs
 from jarvis.voice.session import (
+    ConfirmRequested,
+    ConfirmResolved,
     Heard,
     Info,
+    MicMuted,
     Spoke,
     StateChanged,
     ToolActivity,
+    TurnFinished,
+    UserText,
     VoiceSession,
     VoiceState,
     is_affirmative,
     split_wake_word,
+    summarize_args,
 )
+from jarvis.voice.events import Session
 from jarvis.voice.types import SpeechStarted, Transcript, Utterance
 
 IDLE, LISTENING, THINKING, SPEAKING = VoiceState.IDLE, VoiceState.LISTENING, VoiceState.THINKING, VoiceState.SPEAKING
@@ -714,7 +721,7 @@ async def test_state_sequence_and_events_for_a_normal_turn() -> None:
     rig = Rig({1: say("Jarvis, what time is it")}, [SpeechStarted(), utt(1)], agent=FakeAgent({"what time is it": script}))
     await rig.run()
     assert rig.states() == [LISTENING, THINKING, SPEAKING, IDLE]
-    kinds = [type(e).__name__ for e in rig.events if not isinstance(e, StateChanged)]
+    kinds = [type(e).__name__ for e in rig.events if not isinstance(e, (StateChanged, TurnFinished))]
     assert kinds == ["Heard", "ToolActivity", "ToolActivity", "Spoke"]
     heard = rig.heard()[0]
     assert (heard.text, heard.addressed) == ("Jarvis, what time is it", True)
@@ -853,3 +860,258 @@ def test_display_tracks_events() -> None:
     console.print(display)
     out = console.export_text()
     assert "THINKING" in out and "not for jarvis" in out and "web_search" in out and "jarvis: Hi." in out
+
+
+# -- typed input, mute, cancel, UI confirmation, summaries (the Session protocol) ----------------------
+def of_type(rig: Rig, cls: type) -> list[Any]:
+    return [e for e in rig.events if isinstance(e, cls)]
+
+
+def test_voice_session_satisfies_the_session_protocol() -> None:
+    rig = Rig({})
+    assert isinstance(rig.session, Session)
+    assert rig.session.has_audio is True and rig.session.muted is False
+
+
+class FrameEndpointer:
+    """Every frame starts speech; counts feeds and resets."""
+
+    start_threshold = 0.5
+    in_speech = False
+
+    def __init__(self) -> None:
+        self.fed = self.resets = 0
+
+    def feed(self, frame: Any) -> Any:
+        self.fed += 1
+        return SpeechStarted()
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+async def test_muted_mic_frames_are_ignored_and_unmute_works() -> None:
+    frame = np.zeros(160, dtype=np.float32)
+    rig = Rig({})
+    ep = rig.session.endpointer = FrameEndpointer()
+    rig.session._events = rig.session._mic_events
+    rig.mic._frames = [frame] * 3
+    rig.session.set_muted(True)
+    assert rig.session.muted and ep.resets == 1
+    await rig.run()
+    assert ep.fed == 0 and rig.states() == []
+    assert of_type(rig, MicMuted) == [MicMuted(True)]
+    rig.session.set_muted(False)
+    assert not rig.session.muted and of_type(rig, MicMuted)[-1] == MicMuted(False)
+    rig2 = Rig({})
+    rig2.session.endpointer = ep2 = FrameEndpointer()
+    rig2.session._events = rig2.session._mic_events
+    rig2.mic._frames = [frame] * 2
+    await rig2.run()
+    assert ep2.fed == 2 and rig2.states() == [LISTENING]
+
+
+async def test_typed_input_works_while_muted() -> None:
+    rig = Rig({})
+    rig.session.set_muted(True)
+    rig.session._events = source(lambda: rig.session.submit_text("hello there"))
+    await rig.run()
+    assert rig.agent.texts == ["hello there"]
+    assert rig.spoke() == ["Reply to hello there."]
+
+
+async def test_submit_text_while_idle_starts_a_turn_without_wake_word() -> None:
+    rig = Rig({})
+    rig.session._events = source(
+        lambda: rig.session.submit_text("  what time is it  "), lambda: rig.session.submit_text("   "),
+    )
+    await rig.run()
+    assert rig.agent.texts == ["what time is it"]
+    assert rig.agent.kwargs[0]["output_mode"] == "voice"
+    assert of_type(rig, UserText) == [UserText("what time is it")]
+    assert rig.spoke() == ["Reply to what time is it."]
+    assert rig.session.state is IDLE
+
+
+async def test_submit_text_interrupts_speech_and_cancels_the_running_turn() -> None:
+    rig = Rig({}, agent=FakeAgent({"first": slow_reply(2.0)}), play_time=0.3)
+    rig.session._events = source(
+        lambda: rig.session.submit_text("first"),
+        lambda: until(lambda: bool(rig.speaker.played)),
+        lambda: rig.session.submit_text("second"),
+    )
+    await rig.run()
+    assert rig.agent.cancel_count >= 1
+    assert rig.agent.texts == ["first", "second"]
+    assert rig.speaker.interrupts >= 1
+    assert "Reply to second." in rig.spoke() and "Second sentence." not in rig.spoke()
+
+
+async def test_submit_text_during_confirmation_answers_no_then_runs_the_new_turn() -> None:
+    asked: list[bool] = []
+    rig = Rig({}, agent=FakeAgent({"remove it": confirm_script(asked)}))
+    rig.session._events = source(
+        lambda: rig.session.submit_text("remove it"),
+        lambda: until(lambda: rig.session._confirming is not None),
+        lambda: rig.session.submit_text("something else"),
+    )
+    await rig.run()
+    assert asked == [False]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(False)]
+    assert rig.agent.texts == ["remove it", "something else"]
+    resolved = next(i for i, e in enumerate(rig.events) if isinstance(e, ConfirmResolved))
+    assert resolved < rig.events.index(Spoke("Reply to something else."))
+
+
+@pytest.mark.parametrize("when", ["thinking", "speaking"])
+async def test_cancel_stops_the_turn_and_speech(when: str) -> None:
+    rig = Rig({}, agent=FakeAgent({"go": slow_reply(2.0)}), play_time=0.3)
+    rig.synth.delays["First sentence."] = 0.5  # keeps the session in THINKING for a while
+    ready = (lambda: rig.session.state is THINKING and bool(rig.agent.texts)) if when == "thinking" else (lambda: bool(rig.speaker.played))
+    rig.session._events = source(
+        lambda: rig.session.submit_text("go"), lambda: until(ready), rig.session.cancel, rig.session.cancel,
+    )
+    await rig.run()
+    assert rig.agent.cancel_count == 1
+    assert [e.stopped for e in of_type(rig, TurnFinished)] == ["cancelled"]
+    assert "Second sentence." not in rig.spoke()
+    assert rig.session.state is IDLE
+
+
+async def test_cancel_when_idle_is_a_no_op() -> None:
+    rig = Rig({})
+    rig.session.cancel()
+    rig.session.cancel()
+    assert rig.agent.cancel_count == 0 and rig.speaker.interrupts == 0 and rig.events == []
+
+
+async def _confirm_run(rig: Rig, *steps: Any) -> list[bool]:
+    asked: list[bool] = []
+    rig.agent.scripts["remove it"] = confirm_script(asked)
+    rig.session._events = source(lambda: rig.session.submit_text("remove it"), *steps)
+    await rig.run()
+    return asked
+
+
+@pytest.mark.parametrize("approved", [True, False])
+async def test_ui_answer_resolves_confirmation(approved: bool) -> None:
+    rig = Rig({}, play_time=0.3)
+    asked = await _confirm_run(
+        rig, lambda: until(lambda: rig.session._confirming is not None),
+        lambda: rig.session.answer_confirm(approved),
+        lambda: rig.session.answer_confirm(not approved),  # second answer ignored
+    )
+    assert asked == [approved]
+    assert of_type(rig, ConfirmRequested) == [ConfirmRequested("delete the file")]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(approved)]
+    assert rig.speaker.interrupts >= 1  # the spoken question was cut off
+    assert LISTENING not in rig.states()  # listening was skipped
+
+
+async def test_confirm_requested_is_emitted_before_the_question_is_spoken() -> None:
+    rig = Rig({})
+    await _confirm_run(
+        rig, lambda: until(lambda: rig.session._confirming is not None), lambda: rig.session.answer_confirm(True),
+    )
+    kinds = [type(e).__name__ for e in rig.events]
+    assert kinds.index("ConfirmRequested") < kinds.index("Spoke")
+
+
+async def test_ui_answer_beats_a_later_voice_answer() -> None:
+    rig = Rig({2: say("no")})
+    asked = await _confirm_run(
+        rig, lambda: until(lambda: rig.session._confirming == "listening"),
+        lambda: rig.session.answer_confirm(True), utt(2),
+    )
+    assert asked == [True]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(True)]
+
+
+async def test_voice_answer_then_ui_answer_is_ignored() -> None:
+    rig = Rig({2: say("no")})
+    asked = await _confirm_run(
+        rig, lambda: until(lambda: rig.session._confirming == "listening"),
+        utt(2), lambda: until(lambda: rig.session._confirm_future is None),
+        lambda: rig.session.answer_confirm(True),
+    )
+    assert asked == [False]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(False)]
+
+
+async def test_confirm_timeout_emits_resolved_false_once() -> None:
+    rig = Rig({})
+    rig.session.confirm_timeout = 0.1
+    asked = await _confirm_run(rig)
+    assert asked == [False]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(False)]
+
+
+async def test_cancel_during_confirmation_resolves_false_once() -> None:
+    rig = Rig({})
+    asked = await _confirm_run(
+        rig, lambda: until(lambda: rig.session._confirming == "listening"), rig.session.cancel,
+    )
+    assert asked == [False]
+    assert of_type(rig, ConfirmResolved) == [ConfirmResolved(False)]
+    assert [e.stopped for e in of_type(rig, TurnFinished)] == ["cancelled"]
+
+
+def test_answer_confirm_with_nothing_pending_is_a_no_op() -> None:
+    rig = Rig({})
+    rig.session.answer_confirm(True)
+    assert rig.events == [] and rig.speaker.interrupts == 0
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({}, ""),
+        ({"path": "a.txt", "count": 3}, "path=a.txt, count=3"),
+        ({"text": "line one\nline two\r\n  three"}, "text=line one line two three"),
+        ({"password": "hunter2"}, "password=***"),
+        ({"API_KEY": "abc", "Token": "t", "client_secret": "s", "x": 1}, "API_KEY=***, Token=***, client_secret=***, x=1"),
+        ({"body": "x" * 500}, "body=" + "x" * 29 + "…"),
+    ],
+)
+def test_summarize_args(args: dict, expected: str) -> None:
+    assert summarize_args(args) == expected
+
+
+def test_summarize_args_is_capped_and_never_leaks_secret_values() -> None:
+    args = {f"arg{i}": "v" * 40 for i in range(10)} | {"password": "TOPSECRET"}
+    out = summarize_args(args)
+    assert len(out) <= 80 and "\n" not in out
+    assert "TOPSECRET" not in summarize_args({"password": "TOPSECRET"})
+
+
+async def test_tool_activity_carries_summary_and_seconds() -> None:
+    async def script(agent: FakeAgent, text: str, confirm: Any) -> AsyncIterator[Any]:
+        call = ToolCall("1", "write_file", {"path": "a.txt", "password": "pw"})
+        yield ToolStarted(call)
+        yield ToolFinished(call, ToolResult.success("ok"), 1.5)
+        yield done("Done.")
+
+    rig = Rig({}, agent=FakeAgent({"go": script}))
+    rig.session._events = source(lambda: rig.session.submit_text("go"))
+    await rig.run()
+    started, finished = of_type(rig, ToolActivity)
+    assert started.summary == finished.summary == "path=a.txt, password=***"
+    assert (started.done, finished.done, finished.ok, finished.seconds) == (False, True, True, 1.5)
+
+
+async def test_turn_finished_for_done_cancelled_and_error() -> None:
+    async def boom(agent: FakeAgent, text: str, confirm: Any) -> AsyncIterator[Any]:
+        raise RuntimeError("agent exploded")
+        yield  # pragma: no cover
+
+    rig = Rig({}, agent=FakeAgent({"slow": slow_reply(2.0), "bad": boom}))
+    rig.session._events = source(
+        lambda: rig.session.submit_text("hello"), lambda: until(lambda: rig.session.is_idle()),
+        lambda: rig.session.submit_text("slow"), lambda: until(lambda: rig.session.state is SPEAKING),
+        rig.session.cancel, lambda: until(lambda: rig.session.is_idle()),
+        lambda: rig.session.submit_text("bad"),
+    )
+    await rig.run()
+    finished = of_type(rig, TurnFinished)
+    assert [f.stopped for f in finished] == ["done", "cancelled", "error"]
+    assert finished[0].text == "Reply to hello." and finished[0].model == "fake" and finished[0].steps == 1

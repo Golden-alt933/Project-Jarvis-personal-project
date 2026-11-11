@@ -6,10 +6,11 @@ import getpass
 import logging
 import os
 import platform
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from jarvis.tools.paths import known_folder
 
 if TYPE_CHECKING:
     from jarvis.config import Settings
@@ -17,50 +18,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_KNOWN_FOLDERS = {
-    "Desktop": "B4BFCC3A-DB2C-424C-B029-7FE99A87C641",
-    "Documents": "FDD39AD0-238F-46AF-ADB4-6C85480369C7",
-    "Downloads": "374DE290-123F-4565-9164-39C4925E467B",
-}
-
-
-def _known_folder(name: str) -> Path:
-    """Resolve a standard folder. On Windows these are often redirected (OneDrive),
-    so ask the shell instead of assuming ~/Desktop."""
-    fallback = Path.home() / name
-    if sys.platform != "win32":
-        return fallback
-    try:
-        import ctypes
-        import uuid
-        from ctypes import wintypes
-
-        class _GUID(ctypes.Structure):
-            _fields_ = [
-                ("Data1", wintypes.DWORD),
-                ("Data2", wintypes.WORD),
-                ("Data3", wintypes.WORD),
-                ("Data4", ctypes.c_ubyte * 8),
-            ]
-
-        raw = uuid.UUID(_KNOWN_FOLDERS[name])
-        guid = _GUID(
-            raw.time_low,
-            raw.time_mid,
-            raw.time_hi_version,
-            (ctypes.c_ubyte * 8)(*raw.bytes[8:]),
-        )
-        out = ctypes.c_wchar_p()
-        rc = ctypes.windll.shell32.SHGetKnownFolderPath(  # type: ignore[attr-defined]
-            ctypes.byref(guid), 0, None, ctypes.byref(out)
-        )
-        if rc == 0 and out.value:
-            path = Path(out.value)
-            ctypes.windll.ole32.CoTaskMemFree(out)  # type: ignore[attr-defined]
-            return path
-    except Exception:  # best effort; the fallback is right for most machines
-        log.debug("known folder lookup failed for %s", name, exc_info=True)
-    return fallback
+_PROMPT_FOLDERS = ("Desktop", "Documents", "Downloads")
 
 
 def _machine_section() -> str:
@@ -68,7 +26,7 @@ def _machine_section() -> str:
         user = getpass.getuser()
     except Exception:
         user = os.environ.get("USERNAME", "unknown")
-    folders = ", ".join(f"{n}: {_known_folder(n)}" for n in _KNOWN_FOLDERS)
+    folders = ", ".join(f"{n}: {known_folder(n)}" for n in _PROMPT_FOLDERS)
     return (
         f"The machine: {platform.system()} {platform.release()} ({platform.version()}), "
         f"Windows account '{user}', home directory {Path.home()}. {folders}."

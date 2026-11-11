@@ -28,6 +28,7 @@ import numpy as np
 
 from jarvis.agent.events import Notice, TextChunk, ToolFinished, ToolStarted, TurnDone
 from jarvis.config import Settings
+from jarvis.voice.summary import summarize_args
 from jarvis.voice.types import (
     AudioInput,
     AudioOutput,
@@ -63,51 +64,24 @@ VAD_PLAYING_THRESHOLD = 0.8
 LEVEL_EVENT_INTERVAL = 1 / 15
 
 
-class VoiceState(enum.Enum):
-    IDLE = "idle"
-    LISTENING = "listening"
-    THINKING = "thinking"
-    SPEAKING = "speaking"
-
-
-# -- events for any UI --------------------------------------------------------------
-@dataclass
-class StateChanged:
-    state: VoiceState
-
-
-@dataclass
-class Heard:
-    text: str
-    addressed: bool
-    confidence: float
-
-
-@dataclass
-class Spoke:
-    text: str
-
-
-@dataclass
-class ToolActivity:
-    name: str
-    done: bool
-    ok: bool | None = None
-
-
-@dataclass
-class Levels:
-    mic: float
-    speaker: float
-
-
-@dataclass
-class Info:
-    text: str
-
-
-VoiceEvent = StateChanged | Heard | Spoke | ToolActivity | Levels | Info
-EventCallback = Callable[[VoiceEvent], None]
+# Events and the frontend-facing interface live in jarvis.voice.events (no heavy
+# imports there); re-exported here so existing imports keep working.
+from jarvis.voice.events import (  # noqa: E402,F401
+    ConfirmRequested,
+    ConfirmResolved,
+    EventCallback,
+    Heard,
+    Info,
+    Levels,
+    MicMuted,
+    Spoke,
+    StateChanged,
+    ToolActivity,
+    TurnFinished,
+    UserText,
+    VoiceEvent,
+    VoiceState,
+)
 SourceFactory = Callable[[], AsyncIterator[SpeechStarted | Utterance]]
 
 
@@ -167,12 +141,18 @@ class _Turn:
     said: bool = False  # something has been queued for speech this turn
     filler_said: bool = False
     running_tools: int = 0
+    skip: str | None = None  # a queued sentence not to speak (an already answered question)
 
 
 @dataclass
 class _Heard:
     utterance: Utterance
     barge: bool  # captured after a barge-in: addressed without the wake word
+
+
+@dataclass
+class _Typed:
+    text: str
 
 
 class VoiceSession:
@@ -222,12 +202,54 @@ class VoiceSession:
         self._epoch = 0  # bumped on every interrupt so late synthesis is discarded
         self._confirming: str | None = None  # None | "asking" | "listening"
         self._confirm_future: asyncio.Future[Transcript | None] | None = None
-        self._utt_q: asyncio.Queue[_Heard] = asyncio.Queue()
+        self._question: str | None = None
+        self._muted = False
+        self._utt_q: asyncio.Queue[_Heard | _Typed] = asyncio.Queue()
         self._pump_task: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._last_level_event = 0.0
 
     # -- public API ------------------------------------------------------------------
+    has_audio = True
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, muted: bool) -> None:
+        """Keep the mic open but ignore it: no wake, no barge-in, no utterance."""
+        self._muted = muted
+        if muted:
+            reset = getattr(self.endpointer, "reset", None)
+            if reset is not None:
+                reset()
+            self._capturing = False
+            self._barge = False
+            self._settle()
+        self._emit(MicMuted(muted))
+
+    def submit_text(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        self._emit(UserText(text))
+        self._interrupt_output()  # also answers a pending confirmation with "no"
+        self._utt_q.put_nowait(_Typed(text))
+
+    def cancel(self) -> None:
+        if self._busy():
+            self._interrupt_output()
+
+    def answer_confirm(self, approved: bool) -> None:
+        future = self._confirm_future
+        if future is None or future.done():
+            return
+        turn = self._turn
+        if self._confirming == "asking" and turn is not None:
+            turn.skip = self._question
+        self.speaker.interrupt()
+        future.set_result(Transcript("yes" if approved else "no", 0.0, 1.0))
+
     def is_idle(self) -> bool:
         return self.state is VoiceState.IDLE and not self._busy()
 
@@ -280,6 +302,8 @@ class VoiceSession:
     async def _mic_events(self) -> AsyncIterator[SpeechStarted | Utterance]:
         async for frame in self.mic.frames():
             self._on_frame()
+            if self._muted:
+                continue
             item = self.endpointer.feed(frame)
             if item is not None:
                 yield item
@@ -408,7 +432,15 @@ class VoiceSession:
             log.exception("transcription failed")
             return None
 
-    async def _handle(self, item: _Heard) -> None:
+    async def _handle_typed(self, item: _Typed) -> None:
+        self._open_followup()
+        await self._start_turn(item.text)
+        self._settle()
+
+    async def _handle(self, item: _Heard | _Typed) -> None:
+        if isinstance(item, _Typed):
+            await self._handle_typed(item)
+            return
         if self._confirming == "asking":
             return  # probably the question itself coming back through the mic
         transcript = await self._transcribe(item.utterance)
@@ -489,21 +521,29 @@ class VoiceSession:
         turn.synth_task = asyncio.ensure_future(self._synth_worker(turn))
         turn.filler_task = asyncio.ensure_future(self._filler(turn))
         chunker = self._chunker_factory()
-        got_text = flushed = False
+        got_text = flushed = finished = failed = False
+        started = time.monotonic()
         try:
             async for event in self.agent.run_turn(text, output_mode="voice", confirm=self._voice_confirm):
                 if isinstance(event, TextChunk):
                     got_text = True
                     self._enqueue(turn, chunker.feed(event.text))
                 elif isinstance(event, ToolStarted):
-                    self._emit(ToolActivity(event.call.name, False))
+                    self._emit(ToolActivity(event.call.name, False, summary=summarize_args(event.call.arguments)))
                     self._tool_started(turn)
                 elif isinstance(event, ToolFinished):
-                    self._emit(ToolActivity(event.call.name, True, event.result.ok))
+                    self._emit(ToolActivity(
+                        event.call.name, True, event.result.ok,
+                        summary=summarize_args(event.call.arguments), seconds=event.seconds,
+                    ))
                     self._tool_finished(turn)
                 elif isinstance(event, Notice):
                     self._enqueue(turn, [event.text])
                 elif isinstance(event, TurnDone):
+                    finished = True
+                    self._emit(TurnFinished(
+                        event.text, event.seconds, event.steps, event.tool_calls, event.model, event.stopped,
+                    ))
                     if not got_text and event.stopped != "cancelled":
                         self._enqueue(turn, chunker.feed(event.text))  # e.g. an error apology
                     self._enqueue(turn, chunker.flush())
@@ -514,7 +554,11 @@ class VoiceSession:
         except Exception:
             log.exception("turn failed")
             self._enqueue(turn, [APOLOGY_TEXT])
+            failed = True
         finally:
+            if not finished:  # the agent died or stopped without a TurnDone
+                stopped = "error" if failed else "cancelled" if turn.cancelled else "done"
+                self._emit(TurnFinished("", time.monotonic() - started, 0, 0, "", stopped))
             if not flushed and not turn.cancelled:
                 self._enqueue(turn, chunker.flush())
             await self._finish_turn(turn)
@@ -550,6 +594,9 @@ class VoiceSession:
             try:
                 if sentence is None:
                     return
+                if turn.skip is not None and sentence == turn.skip:
+                    turn.skip = None
+                    continue
                 if turn.cancelled or epoch != self._epoch:
                     continue
                 audio = await self._synthesize(sentence)
@@ -600,23 +647,26 @@ class VoiceSession:
     async def _voice_confirm(self, description: str) -> bool:
         turn = self._turn
         loop = asyncio.get_running_loop()
-        self._confirm_future = loop.create_future()
+        self._confirm_future = future = loop.create_future()
         self._confirming = "asking"
-        question = f"Shall I go ahead and {description}? Say yes or no."
+        self._question = question = f"Shall I go ahead and {description}? Say yes or no."
+        self._emit(ConfirmRequested(description))
         approved = False
         try:
             if turn is not None:
                 turn.said = True
                 turn.queue.put_nowait(question)
                 await turn.queue.join()
-                await self.speaker.drain()
+                if not future.done():
+                    await self.speaker.drain()
             else:
                 await self.say(question)
-            if self._confirming == "asking":
-                self._confirming = "listening"
-            self._set_state(VoiceState.LISTENING)
+            if not future.done():
+                if self._confirming == "asking":
+                    self._confirming = "listening"
+                self._set_state(VoiceState.LISTENING)
             try:
-                answer = await asyncio.wait_for(self._confirm_future, self.confirm_timeout)
+                answer = await asyncio.wait_for(future, self.confirm_timeout)
             except asyncio.TimeoutError:
                 answer = None
             approved = (
@@ -625,7 +675,11 @@ class VoiceSession:
         finally:
             self._confirming = None
             self._confirm_future = None
+            self._question = None
             self._capturing = False
+            if turn is not None:
+                turn.skip = None
+            self._emit(ConfirmResolved(approved))
         if turn is not None and not turn.cancelled:
             self._enqueue(turn, [CONFIRM_ACK_YES if approved else CONFIRM_ACK_NO])
             self._set_state(VoiceState.THINKING)

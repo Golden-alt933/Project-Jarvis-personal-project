@@ -552,30 +552,78 @@ def test_scan_shortcuts_filters_junk(tmp_path):
 
 
 # -- close_app
-def test_close_app_graceful(monkeypatch, windows):
-    monkeypatch.setattr(system, "_visible_windows", lambda: [("notepad.exe", "Untitled - Notepad", 1), ("chrome.exe", "x", 2)])
-    cmds = []
-    monkeypatch.setattr(system.subprocess, "run", lambda cmd, **k: cmds.append(cmd))
-    monkeypatch.setattr(system, "_still_running", lambda procs: False)
+def _fake_windows(monkeypatch, windows, closes_on_post=True):
+    """windows: list of (proc, title, pid, hwnd). Posting WM_CLOSE removes the window
+    unless closes_on_post is False (an app that keeps a prompt open)."""
+    state = list(windows)
+    posted: list[int] = []
+
+    def post(hwnd):
+        posted.append(hwnd)
+        if closes_on_post:
+            state[:] = [w for w in state if w[3] != hwnd]
+
+    monkeypatch.setattr(system, "_windows", lambda: list(state))
+    monkeypatch.setattr(system, "_post_close", post)
+    monkeypatch.setattr(system.time, "sleep", lambda s: None)
+    return posted
+
+
+def test_close_app_closes_only_that_apps_windows(monkeypatch, windows):
+    posted = _fake_windows(monkeypatch, [
+        ("notepad.exe", "Untitled - Notepad", 1, 101),
+        ("notepad.exe", "todo.txt - Notepad", 1, 102),
+        ("chrome.exe", "Notepad alternatives - Google Chrome", 2, 201),
+    ])
     r = system.close_app("notepad")
     assert r.ok and r.data["closed"] is True
-    assert cmds == [["taskkill", "/IM", "notepad.exe"]] and "/F" not in cmds[0]
+    assert posted == [101, 102]  # the Chrome tab that mentions the word is left alone
 
 
-def test_close_app_still_running(monkeypatch, windows):
-    monkeypatch.setattr(system, "_visible_windows", lambda: [("notepad.exe", "Untitled", 1)])
-    monkeypatch.setattr(system.subprocess, "run", lambda cmd, **k: None)
-    monkeypatch.setattr(system, "_still_running", lambda procs: True)
-    monkeypatch.setattr(system.time, "sleep", lambda s: None)
+def test_close_app_in_shared_host_closes_one_window(monkeypatch, windows):
+    posted = _fake_windows(monkeypatch, [
+        ("ApplicationFrameHost.exe", "Calculator", 5, 301),
+        ("ApplicationFrameHost.exe", "Settings", 5, 302),
+        ("explorer.exe", "Program Manager", 6, 401),
+        ("explorer.exe", "Downloads - File Explorer", 6, 402),
+    ])
+    r = system.close_app("calculator")
+    assert r.ok and posted == [301]
+    posted.clear()
+    r = system.close_app("file explorer")
+    assert r.ok and posted == [402]  # never the desktop shell
+
+
+def test_close_app_by_process_name(monkeypatch, windows):
+    posted = _fake_windows(monkeypatch, [
+        ("chrome.exe", "YouTube - Google Chrome", 2, 201),
+        ("chrome.exe", "Inbox - Google Chrome", 2, 202),
+        ("Spotify.exe", "Spotify Premium", 3, 203),
+    ])
+    assert system.close_app("chrome").ok and posted == [201, 202]
+
+
+def test_close_app_still_open(monkeypatch, windows):
+    _fake_windows(monkeypatch, [("notepad.exe", "Untitled - Notepad", 1, 101)], closes_on_post=False)
     monkeypatch.setattr(system.time, "monotonic", iter(range(0, 1000, 5)).__next__)
     r = system.close_app("notepad")
-    assert r.ok and r.data["closed"] is False and "still running" in r.content
+    assert r.ok and r.data["closed"] is False and "Still open" in r.content
 
 
 def test_close_app_not_running(monkeypatch, windows):
-    monkeypatch.setattr(system, "_visible_windows", lambda: [("chrome.exe", "x", 1)])
+    _fake_windows(monkeypatch, [("chrome.exe", "x - Google Chrome", 1, 1)])
     r = system.close_app("notepad")
-    assert not r.ok and "chrome.exe" in r.content
+    assert not r.ok and "Google Chrome" in r.content
+
+
+def test_close_app_never_kills_a_process(monkeypatch, windows):
+    _fake_windows(monkeypatch, [("notepad.exe", "Untitled - Notepad", 1, 101)])
+
+    def no_kill(*a, **k):
+        raise AssertionError("close_app must not run a process-kill command")
+
+    monkeypatch.setattr(system.subprocess, "run", no_kill)
+    assert system.close_app("notepad").ok
 
 
 # -- volume, media, lock, clipboard, url

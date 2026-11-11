@@ -14,6 +14,7 @@ from openpyxl.styles import Font
 from jarvis.config import Settings
 from jarvis.llm.types import ToolCall
 from jarvis.tools.base import Risk, ToolContext
+from jarvis.tools import excel_calc
 from jarvis.tools.builtin import excel
 from jarvis.tools.registry import ToolRegistry
 
@@ -41,7 +42,14 @@ def fake_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Monk
     home.mkdir()
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(excel, "known_folder", lambda name: home / name)
     return home
+
+
+@pytest.fixture(autouse=True)
+def no_real_excel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests never start Excel; the COM path is tested with fakes in test_excel_calc."""
+    monkeypatch.setattr(excel_calc, "excel_installed", lambda: False)
 
 
 def ctx_for(answer: bool = True) -> tuple[ToolContext, Asker]:
@@ -68,6 +76,20 @@ def budget(tmp_path: Path) -> Path:
     ws.column_dimensions["A"].width = 33
     wb.create_sheet("Notes")["A1"] = "keep me"
     path = tmp_path / "budget.xlsx"
+    wb.save(path)
+    return path
+
+
+@pytest.fixture
+def lookup_book(tmp_path: Path) -> Path:
+    """Like `budget`, but its Total formulas use a function Jarvis cannot calculate."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Budget"
+    ws.append(["Item", "Qty", "Price", "Total"])
+    ws.append(["Rent", 1, 1200, "=XLOOKUP(A2,A:A,B:B)"])
+    ws.append(["Food", 4, 150.5, "=XLOOKUP(A3,A:A,B:B)"])
+    path = tmp_path / "lookup.xlsx"
     wb.save(path)
     return path
 
@@ -101,6 +123,7 @@ def test_overview_xlsx(registry: ToolRegistry, budget: Path):
     assert "Sheet 'Budget' A1:D4" in r.content
     assert "header row 1: Item, Qty, Price, Total" in r.content
     assert "formulas: 2 (2 with no cached value" in r.content
+    assert "2 | Rent | 1 | 1200 | 1200*" in r.content  # computed by Jarvis, marked with *
     assert "macros: no" in r.content
     assert "Sheet 'Notes'" in r.content
 
@@ -153,14 +176,33 @@ def test_corrupt_workbook_reported(registry: ToolRegistry, tmp_path: Path):
 
 
 # ---------------------------------------------------------------------- read
-def test_read_grid_has_labels_and_flags_uncalculated(registry: ToolRegistry, budget: Path):
-    r = call(registry, "excel_read", path=str(budget), sheet="Budget")
+def test_read_grid_has_labels_and_flags_uncalculated(registry: ToolRegistry, lookup_book: Path):
+    r = call(registry, "excel_read", path=str(lookup_book), sheet="Budget")
     assert r.ok, r.content
     lines = r.content.splitlines()
     assert "| A | B | C | D" in lines[1]
     assert any(ln.startswith("2 | Rent | 1 | 1200 | (uncalculated)") for ln in lines)
     assert "2 formula cell(s) show (uncalculated)" in r.content
     assert "never calculated" in r.content
+    assert "Jarvis cannot calculate XLOOKUP" in r.content
+
+
+def test_read_computes_uncached_formulas_and_labels_them(registry: ToolRegistry, budget: Path):
+    r = call(registry, "excel_read", path=str(budget), sheet="Budget", cell_range="A1:D3")
+    lines = r.content.splitlines()
+    assert any(ln.startswith("2 | Rent | 1 | 1200 | 1200*") for ln in lines)
+    assert any(ln.startswith("3 | Food | 4 | 150.5 | 602*") for ln in lines)
+    assert "2 value(s) marked * were calculated by Jarvis" in r.content
+    assert "(uncalculated)" not in r.content
+    stored = call(registry, "excel_read", path=str(budget), sheet="Budget", cell_range="B2:C3")
+    assert "*" not in stored.content  # plain stored values are never marked
+
+
+def test_query_uses_computed_values(registry: ToolRegistry, budget: Path):
+    r = call(registry, "excel_query", path=str(budget), sheet="Budget", column="Total", operation="sum")
+    assert r.ok, r.content
+    assert "Sum of 'Total' (D2:D4, sheet 'Budget', header row 1): 1802" in r.content
+    assert "2 formula value(s) in this column were calculated by Jarvis" in r.content
 
 
 def test_read_formulas_true_shows_formula_text(registry: ToolRegistry, budget: Path):
@@ -173,7 +215,7 @@ def test_read_distinguishes_empty_from_uncalculated(registry: ToolRegistry, tmp_
     wb = Workbook()
     ws = wb.active
     ws["A1"] = 5
-    ws["C1"] = "=A1*2"
+    ws["C1"] = "=FOO(A1)"
     p = tmp_path / "e.xlsx"
     wb.save(p)
     row = call(registry, "excel_read", path=str(p), cell_range="A1:C1").content.splitlines()[2]
@@ -244,7 +286,7 @@ def test_write_round_trip_preserves_formatting_and_sheets(registry: ToolRegistry
              cells={"B2": 42, "E1": "Tax", "E2": "=D2*0.18"})
     assert r.ok, r.content
     assert "Wrote 3 cells" in r.content and "1 formula" in r.content
-    assert "next opened in Excel" in r.content
+    assert "Excel is not installed" in r.content and "E2 = 9072" in r.content  # 42 * 1200 * 0.18
     wb = load_workbook(budget)
     ws = wb["Budget"]
     assert ws["B2"].value == 42 and ws["E1"].value == "Tax"
@@ -422,7 +464,7 @@ def test_append_below_last_used_row_ignoring_formatting(registry: ToolRegistry, 
     r = call(registry, "excel_append_rows", path=str(budget), sheet="Budget",
              rows=[["Water", 1, 30, "=B5*C5"], ["Net", None, 20]])
     assert r.ok, r.content
-    assert "Appended 2 rows at A5:D6" in r.content and "next opened in Excel" in r.content
+    assert "Appended 2 rows at A5:D6" in r.content and "D5 = 30" in r.content
     ws = load_workbook(budget)["Budget"]
     assert [c.value for c in ws[5]] == ["Water", 1, 30, "=B5*C5"]
     assert [c.value for c in ws[6]][:3] == ["Net", None, 20]
@@ -510,7 +552,7 @@ def test_create_non_ascii_sheet_names_and_values(registry: ToolRegistry, tmp_pat
 
 def test_create_formula_note(registry: ToolRegistry, tmp_path: Path):
     r = call(registry, "excel_create", path=str(tmp_path / "f.xlsx"), sheets={"S": [["a", "b"], [1, "=A2*2"]]})
-    assert r.ok and "first opened in Excel" in r.content
+    assert r.ok and "B2 = 2" in r.content and "built-in evaluator" in r.content
 
 
 # --------------------------------------------------------------------- query
@@ -561,10 +603,11 @@ def test_query_errors(registry: ToolRegistry, budget: Path):
     assert not notes.ok and "Sheets in budget.xlsx" in notes.content
 
 
-def test_query_reports_uncalculated_formulas(registry: ToolRegistry, budget: Path):
-    r = call(registry, "excel_query", path=str(budget), sheet="Budget", column="Total", operation="sum")
+def test_query_reports_uncalculated_formulas(registry: ToolRegistry, lookup_book: Path):
+    r = call(registry, "excel_query", path=str(lookup_book), sheet="Budget", column="Total", operation="sum")
     assert not r.ok
     assert "2 formula cell(s) skipped because they have no cached value" in r.content
+    assert "Jarvis cannot calculate: XLOOKUP" in r.content
 
 
 def test_query_ambiguous_header(registry: ToolRegistry, tmp_path: Path):
@@ -650,3 +693,56 @@ def test_read_column_and_row_ranges(registry: ToolRegistry, budget: Path):
     assert cols.ok and "| B | C" in cols.content and "1 | Qty | Price" in cols.content
     rows = call(registry, "excel_read", path=str(budget), sheet="Budget", cell_range="2:3")
     assert rows.ok and "2 | Rent" in rows.content and "4 | Gym" not in rows.content
+
+
+# ------------------------------------------------------ recalculation reports
+def test_write_reports_excel_calculated_values(registry: ToolRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    seen: list[Path] = []
+
+    def fake_recalc(path: Path, timeout: float = 40.0) -> excel_calc.Recalc:
+        seen.append(path)
+        return excel_calc.Recalc("ok")
+
+    monkeypatch.setattr(excel_calc, "recalculate", fake_recalc)
+    p = tmp_path / "calc.xlsx"
+    r = call(registry, "excel_write", path=str(p), sheet="S",
+             cells={"B2": 12000, "B3": 8500, "B4": 4049, "B5": 3000, "B6": "=SUM(B2:B5)"})
+    assert r.ok, r.content
+    assert seen == [p]
+    assert "Excel recalculated the workbook" in r.content and "B6 = 27549" in r.content
+
+
+def test_write_without_formulas_does_not_start_excel(registry: ToolRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(excel_calc, "recalculate", lambda *a, **k: pytest.fail("Excel started for a workbook without formulas"))
+    r = call(registry, "excel_write", path=str(tmp_path / "plain.xlsx"), sheet="S", cells={"A1": 1})
+    assert r.ok, r.content
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "expected"),
+    [
+        ("locked", "b.xlsx is open in Excel", "so it was not recalculated"),
+        ("timeout", "Excel did not finish within 40s and was stopped", "did not complete"),
+        ("failed", "RuntimeError: boom", "did not complete"),
+    ],
+)
+def test_write_falls_back_to_builtin_values(
+    registry: ToolRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, detail: str, expected: str
+):
+    monkeypatch.setattr(excel_calc, "recalculate", lambda *a, **k: excel_calc.Recalc(status, detail))
+    r = call(registry, "excel_write", path=str(tmp_path / "b.xlsx"), sheet="S", cells={"A1": 4, "B1": "=A1*A1"})
+    assert r.ok, r.content
+    assert expected in r.content and "built-in evaluator: B1 = 16" in r.content
+
+
+def test_write_reports_unsupported_formula(registry: ToolRegistry, tmp_path: Path):
+    r = call(registry, "excel_write", path=str(tmp_path / "u.xlsx"), sheet="S", cells={"A1": "=XLOOKUP(1,B:B,C:C)"})
+    assert r.ok and "A1 = (uncalculated: XLOOKUP is not supported)" in r.content
+
+
+def test_create_reports_values_with_sheet_names(registry: ToolRegistry, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(excel_calc, "recalculate", lambda *a, **k: excel_calc.Recalc("ok"))
+    r = call(registry, "excel_create", path=str(tmp_path / "m.xlsx"),
+             sheets={"A": [[1, 2, "=A1+B1"]], "B": [["=A!C1*2"]]})
+    assert r.ok, r.content
+    assert "A!C1 = 3" in r.content and "B!A1 = 6" in r.content

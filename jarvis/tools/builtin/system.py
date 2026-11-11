@@ -179,7 +179,8 @@ def system_status() -> ToolResult:
 # apps: catalog, fuzzy resolve, launch
 # --------------------------------------------------------------------------
 class AppEntry:
-    """One launchable thing. kind: 'lnk' (shortcut path), 'uwp' (AppID), 'exe' (command)."""
+    """One launchable thing. kind: 'lnk' (shortcut path), 'uwp' (AppID), 'exe' (command),
+    'webapp' (a shortcut that opens a site in a browser window, e.g. a Chrome app)."""
 
     __slots__ = ("name", "kind", "target")
 
@@ -222,6 +223,25 @@ def _start_menu_dirs() -> list[Path]:
     ]
 
 
+# Browsers install site shortcuts ("Calculator", "YouTube") that launch through these.
+_BROWSER_LAUNCHERS = ("chrome_proxy.exe", "msedge_proxy.exe", "brave_proxy.exe")
+
+
+_BROWSER_APP_ID = re.compile(r"(chrome|msedge|brave|chromium)\._crx_", re.IGNORECASE)
+
+
+def _is_webapp_shortcut(path: Path) -> bool:
+    """True if the .lnk opens a website in a browser window rather than a real app.
+    The target path is stored in the file as ANSI and/or UTF-16, so a byte search is enough."""
+    if any(part.lower().endswith(" apps") for part in path.parts[-3:-1]):
+        return True  # e.g. Start Menu\Programs\Chrome Apps
+    try:
+        raw = path.read_bytes()[:8192].lower()
+    except OSError:
+        return False
+    return any(n.encode() in raw or n.encode("utf-16-le") in raw for n in _BROWSER_LAUNCHERS)
+
+
 def _scan_shortcuts(dirs: list[Path]) -> list[AppEntry]:
     found: dict[str, AppEntry] = {}
     for base in dirs:
@@ -231,7 +251,10 @@ def _scan_shortcuts(dirs: list[Path]) -> list[AppEntry]:
             name = path.stem
             if _JUNK.search(name):
                 continue
-            found.setdefault(name.lower(), AppEntry(name, "lnk", str(path)))
+            kind = "webapp" if _is_webapp_shortcut(path) else "lnk"
+            key = name.lower()
+            if key not in found or (found[key].kind == "webapp" and kind == "lnk"):
+                found[key] = AppEntry(name, kind, str(path))
     return list(found.values())
 
 
@@ -250,7 +273,10 @@ def _scan_uwp() -> list[AppEntry]:
     for item in data:
         name, app_id = item.get("Name"), item.get("AppID")
         if name and app_id and not _JUNK.search(name):
-            entries.append(AppEntry(name, "uwp", app_id))
+            # Get-StartApps also lists browser site shortcuts ("Chrome._crx_…"), often
+            # with the same name as a real app and ahead of it.
+            kind = "webapp" if _BROWSER_APP_ID.match(app_id) else "uwp"
+            entries.append(AppEntry(name, kind, app_id))
     return entries
 
 
@@ -263,10 +289,16 @@ def _catalog(refresh: bool = False) -> list[AppEntry]:
     now = time.monotonic()
     if not refresh and _catalog_cache and now - _catalog_cache[0] < _CATALOG_TTL:
         return _catalog_cache[1]
-    # Shortcuts first so a real install wins over a same-named UWP or exe entry.
+    # Real installs first so they win over a same-named Store or stock entry. Browser
+    # site shortcuts go last and keep a distinct name: a Chrome shortcut called
+    # "Calculator" must never be what "open calculator" launches.
+    found = _scan_shortcuts(_start_menu_dirs()) + _scan_uwp() + _common_exes()
     merged: dict[str, AppEntry] = {}
-    for entry in _scan_shortcuts(_start_menu_dirs()) + _scan_uwp() + _common_exes():
+    for entry in (e for e in found if e.kind != "webapp"):
         merged.setdefault(entry.name.lower(), entry)
+    for entry in (e for e in found if e.kind == "webapp"):
+        label = entry.name if entry.name.lower() not in merged else f"{entry.name} (browser app)"
+        merged.setdefault(label.lower(), AppEntry(label, "webapp", entry.target))
     _catalog_cache = (now, sorted(merged.values(), key=lambda e: e.name.lower()))
     return _catalog_cache[1]
 
@@ -308,10 +340,32 @@ def resolve_app(name: str, entries: list[AppEntry]) -> tuple[AppEntry | None, li
 
 
 def _launch(entry: AppEntry) -> None:
-    if entry.kind == "uwp":
+    if not entry.target.lower().endswith((".lnk", ".exe")):  # a Start-menu AppID
         subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{entry.target}"], creationflags=_NO_WINDOW)
     else:
         os.startfile(entry.target)  # type: ignore[attr-defined]  # Windows only
+
+
+_LAUNCH_WAIT = 5.0
+
+
+def _window_keys() -> list[tuple[str, str]]:
+    try:
+        return [(w[0], w[1]) for w in _visible_windows()]
+    except Exception:  # window enumeration is best effort
+        return []
+
+
+def _wait_for_new_window(before: set[tuple[str, str]]) -> str | None:
+    """Poll for a window that was not there before the launch; say what actually opened."""
+    deadline = time.monotonic() + _LAUNCH_WAIT
+    while time.monotonic() < deadline:
+        time.sleep(0.3)
+        fresh = [k for k in _window_keys() if k not in before]
+        if fresh:
+            proc, title = fresh[0]
+            return f"{title} ({proc})"
+    return None
 
 
 @tool(group="system", timeout=40)
@@ -364,20 +418,35 @@ def open_app(name: str) -> ToolResult:
             else "Use list_installed_apps to see what is available."
         )
         return ToolResult.fail(f"no installed app matches '{name}'", hint)
+    before = set(_window_keys())
     try:
         _launch(best)
     except OSError as exc:
         return ToolResult.fail(f"could not launch {best.name}: {exc}")
-    return ToolResult.success(f"Launched {best.name}.", data={"app": best.name, "kind": best.kind})
+    opened = _wait_for_new_window(before)
+    what = "a browser shortcut" if best.kind == "webapp" else "an app"
+    if opened:
+        text = f"Launched {best.name} ({what}). New window: {opened}."
+    else:
+        text = (
+            f"Asked Windows to launch {best.name} ({what}), but no new window appeared within "
+            f"{_LAUNCH_WAIT:.0f} s. It may still be starting, or it reused an existing window."
+        )
+    return ToolResult.success(text, data={"app": best.name, "kind": best.kind, "window": opened})
 
 
 # -- running apps ---------------------------------------------------------
 def _visible_windows() -> list[tuple[str, str, int]]:
     """(process name, window title, pid) for each top-level visible window."""
+    return [(proc, title, pid) for proc, title, pid, _ in _windows()]
+
+
+def _windows() -> list[tuple[str, str, int, int]]:
+    """(process name, window title, pid, window handle) for each top-level visible window."""
     if not _IS_WINDOWS:
         return []
     user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
-    results: list[tuple[str, str, int]] = []
+    results: list[tuple[str, str, int, int]] = []
     enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
     def callback(hwnd: int, _: int) -> bool:
@@ -396,7 +465,7 @@ def _visible_windows() -> list[tuple[str, str, int]]:
             proc = psutil.Process(pid.value).name()
         except psutil.Error:
             return True
-        results.append((proc, buf.value, pid.value))
+        results.append((proc, buf.value, pid.value, int(hwnd or 0)))
         return True
 
     user32.EnumWindows(enum_proc(callback), 0)
@@ -422,21 +491,50 @@ def list_running_apps() -> ToolResult:
     return ToolResult.success("\n".join(lines), data=by_proc)
 
 
-def _match_processes(name: str, windows: list[tuple[str, str, int]]) -> list[str]:
-    """Process names (with visible windows) that correspond to a spoken app name."""
+# Processes that host windows belonging to many different apps. Matching these by
+# process name, or closing the process, would hit every app they host.
+_SHARED_HOSTS = {"applicationframehost.exe", "explorer.exe", "systemsettings.exe"}
+_NEVER_CLOSE_TITLES = {"program manager"}  # the desktop shell itself
+_WM_CLOSE = 0x0010
+_TITLE_SEPARATOR = re.compile(r"\s+[-–—|]\s+")
+
+
+def _title_app_name(title: str) -> str:
+    """The app part of a window title: "Untitled - Notepad" -> "notepad"."""
+    return _norm(_TITLE_SEPARATOR.split(title)[-1])
+
+
+def _match_windows(
+    name: str, windows: list[tuple[str, str, int, int]]
+) -> list[tuple[str, str, int, int]]:
+    """Windows that belong to the app a person means by `name`.
+
+    A window matches when its process is that app ("chrome" -> chrome.exe, all of its
+    windows), or when the app part of its title is that app ("calculator" -> the
+    Calculator window inside the shared Store-app host). A word merely appearing in a
+    title, such as a browser tab about calculators, is not a match.
+    """
     wanted = _norm(name)
-    matched: dict[str, float] = {}
-    for proc, title, _ in windows:
-        stem = _norm(Path(proc).stem)
-        score = max(_score(wanted, stem), 0.85 if wanted and wanted in _norm(title) else 0.0)
-        if score >= 0.72:
-            matched[proc] = max(matched.get(proc, 0.0), score)
-    return sorted(matched, key=lambda p: -matched[p])
+    matched = []
+    for window in windows:
+        proc, title = window[0], window[1]
+        if _norm(title) in _NEVER_CLOSE_TITLES:
+            continue
+        by_process = (
+            proc.lower() not in _SHARED_HOSTS and _score(wanted, _norm(Path(proc).stem)) >= 0.72
+        )
+        by_title = _score(wanted, _title_app_name(title)) >= 0.86
+        if by_process or by_title:
+            matched.append(window)
+    return matched
 
 
-def _still_running(proc_names: list[str]) -> bool:
-    wanted = {p.lower() for p in proc_names}
-    return any((p.info["name"] or "").lower() in wanted for p in psutil.process_iter(["name"]))
+def _post_close(hwnd: int) -> None:
+    ctypes.windll.user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+
+
+def _open_handles() -> set[int]:
+    return {w[3] for w in _windows()}
 
 
 @tool(
@@ -448,35 +546,45 @@ def _still_running(proc_names: list[str]) -> bool:
 def close_app(name: str) -> ToolResult:
     """Ask a running application to close, the way clicking its X button would.
 
-    Use when the user asks to quit or close an app. It is graceful (no force
-    kill), so an app with unsaved work may stay open and prompt the user; the
-    result says whether it is still running.
+    Use when the user asks to quit or close an app. Only that app's own windows are
+    closed. It is graceful (no force kill), so an app with unsaved work may stay open
+    and prompt the user; the result says which windows closed and which are still open.
 
     Args:
-        name: App or process name, for example "notepad" or "Chrome".
+        name: App name as a person would say it, for example "notepad" or "Chrome".
     """
     if not _IS_WINDOWS:
         return ToolResult.fail("closing apps is only supported on Windows")
-    windows = _visible_windows()
-    procs = _match_processes(name, windows)
-    if not procs:
-        open_now = sorted({p for p, _, _ in windows})
+    windows = _windows()
+    targets = _match_windows(name, windows)
+    if not targets:
+        open_now = sorted({f"{t} ({p})" for p, t, _, _ in windows})[:12]
         return ToolResult.fail(
-            f"no running app with a window matches '{name}'",
-            "Apps with windows: " + (", ".join(open_now) or "none"),
+            f"no open window belongs to an app called '{name}'",
+            "Open windows: " + ("; ".join(open_now) or "none"),
         )
-    for proc in procs:
-        subprocess.run(["taskkill", "/IM", proc], capture_output=True, timeout=10, creationflags=_NO_WINDOW)
+    for _, _, _, hwnd in targets:
+        _post_close(hwnd)
     deadline = time.monotonic() + 4
-    while time.monotonic() < deadline and _still_running(procs):
+    remaining = targets
+    while time.monotonic() < deadline:
+        alive = _open_handles()
+        remaining = [w for w in targets if w[3] in alive]
+        if not remaining:
+            break
         time.sleep(0.4)
-    if _still_running(procs):
+    closed = [w[1] for w in targets if w not in remaining]
+    if remaining:
+        still = "; ".join(w[1] for w in remaining)
+        done = f"Closed: {'; '.join(closed)}. " if closed else ""
         return ToolResult.success(
-            f"Asked {', '.join(procs)} to close, but it is still running "
-            "(probably waiting on the user, for example an unsaved-changes prompt).",
-            data={"closed": False},
+            f"{done}Still open: {still} (probably waiting on the user, for example an "
+            "unsaved-changes prompt).",
+            data={"closed": False, "closed_windows": closed},
         )
-    return ToolResult.success(f"Closed {', '.join(procs)}.", data={"closed": True})
+    return ToolResult.success(
+        f"Closed {'; '.join(closed)}.", data={"closed": True, "closed_windows": closed}
+    )
 
 
 # --------------------------------------------------------------------------

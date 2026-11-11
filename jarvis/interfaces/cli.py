@@ -504,6 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", help="override JARVIS_MODEL for this run")
     p.add_argument("--verbose", action="store_true", help="show tool arguments and result previews")
     p.add_argument("--voice", action="store_true", help="talk to Jarvis: always-open microphone and spoken replies")
+    p.add_argument("--hud", action="store_true", help="open the HUD window with voice")
+    p.add_argument("--hud-demo", action="store_true", help="open the HUD with a scripted demo (no microphone or model)")
+    p.add_argument("--no-voice", action="store_true", help="with --hud: text-only HUD, no microphone or speech models")
     p.add_argument("--devices", action="store_true", help="list audio devices and exit")
     p.add_argument("--browser-token", action="store_true", help="print the Chrome extension pairing token and folder, then exit")
     p.add_argument("--no-wake", action="store_true", help="voice: treat every utterance as addressed to Jarvis")
@@ -587,12 +590,24 @@ async def _with_cleanup(main: Any, settings: Any = None) -> int:
             await shutdown_bridge()
 
 
+def _run_hud_mode(app: Any, console: Console, *, voice: bool, demo: bool) -> int:
+    from jarvis.interfaces import hud
+
+    if not hud.hud_available():
+        console.print(Text(hud.hud_install_message(), style="yellow"))
+        return 2
+    # run_hud runs _with_cleanup inside its own Qt event loop
+    return hud.run_hud(app, console, voice=voice, demo=demo)
+
+
 def main(argv: list[str] | None = None) -> int:
     _force_utf8()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.voice and args.once is not None:
         parser.error("--voice and --once cannot be combined")
+    if (args.hud or args.hud_demo) and (args.voice or args.once is not None):
+        parser.error("--hud cannot be combined with --voice or --once")
     if args.browser_token:
         return print_browser_token()
     console = Console()
@@ -611,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
         resumed = False if args.new else app.resume()
         if args.once is not None:
             return asyncio.run(_with_cleanup(run_once(app, args.once, console, yes=args.yes, verbose=args.verbose), app.settings))
+        if args.hud or args.hud_demo:
+            return _run_hud_mode(app, console, voice=not args.no_voice, demo=args.hud_demo)
         if args.voice:
             try:
                 from jarvis.interfaces.voice import run_voice

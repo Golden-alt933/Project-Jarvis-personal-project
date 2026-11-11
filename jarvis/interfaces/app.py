@@ -46,6 +46,19 @@ class App:
             logging.getLogger(__name__).debug("could not drop unused conversation", exc_info=True)
         return True
 
+    def use_voice_model(self) -> str | None:
+        """Switch the agent to the faster model meant for spoken turns, if there is one.
+        Returns its description, or None when the main model stays in use."""
+        from jarvis.llm.providers import build_voice_client, describe
+
+        if self.agent.primary.is_local:
+            return None
+        client = build_voice_client(self.settings)
+        if client is None:
+            return None
+        self.agent.primary = client
+        return describe(client)
+
     def close(self) -> None:
         self.store.close()
 

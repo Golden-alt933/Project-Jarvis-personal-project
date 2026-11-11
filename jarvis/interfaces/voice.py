@@ -13,12 +13,17 @@ from rich.text import Text
 from jarvis.interfaces.app import App
 from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.voice.session import (
+    ConfirmRequested,
+    ConfirmResolved,
     Heard,
     Info,
     Levels,
+    MicMuted,
     Spoke,
     StateChanged,
     ToolActivity,
+    TurnFinished,
+    UserText,
     VoiceEvent,
     VoiceSession,
     VoiceState,
@@ -54,17 +59,31 @@ class VoiceDisplay:
         self.reply: list[str] = []
         self.tools: deque[str] = deque(maxlen=4)
         self.info = ""
+        self.muted = False
+        self.confirm = ""  # description of the action awaiting yes/no, else ""
+        self.footer = ""
 
     def handle(self, event: VoiceEvent) -> None:
         if isinstance(event, StateChanged):
             if event.state is VoiceState.THINKING:
                 self.reply.clear()
                 self.tools.clear()
+                self.footer = ""
             self.state = event.state
         elif isinstance(event, Levels):
             self.mic, self.speaker = event.mic, event.speaker
         elif isinstance(event, Heard):
             self.heard = event
+        elif isinstance(event, UserText):
+            self.heard = Heard(event.text, True, 1.0)
+        elif isinstance(event, ConfirmRequested):
+            self.confirm = event.description
+        elif isinstance(event, ConfirmResolved):
+            self.confirm = ""
+        elif isinstance(event, MicMuted):
+            self.muted = event.muted
+        elif isinstance(event, TurnFinished):
+            self.footer = f"{event.seconds:.1f}s, {event.tool_calls} tool calls, {event.model}"
         elif isinstance(event, Spoke):
             self.reply.append(event.text)
         elif isinstance(event, ToolActivity):
@@ -84,6 +103,8 @@ class VoiceDisplay:
         head.append(f"● {self.state.value.upper():<10}", style=STATE_STYLE[self.state])
         head.append(f" mic {meter(self.mic)} ", style="green")
         head.append(f"out {meter(self.speaker)}", style="cyan")
+        if self.muted:
+            head.append("  MUTED", style="bold red")
         lines: list[Text] = [head]
         if self.heard is not None:
             style = "" if self.heard.addressed else "dim"
@@ -93,6 +114,10 @@ class VoiceDisplay:
             lines.append(Text(tool, style="dim"))
         if self.reply:
             lines.append(Text(f"  jarvis: {' '.join(self.reply)}", style="bold"))
+        if self.confirm:
+            lines.append(Text(f"  confirm? {self.confirm} (say yes or no)", style="bold yellow"))
+        if self.footer:
+            lines.append(Text(f"  {self.footer}", style="dim"))
         if self.info:
             lines.append(Text(f"  {self.info}", style="yellow"))
         return Group(*lines)
@@ -130,6 +155,9 @@ async def run_voice(app: App, console: Console | None = None) -> int:
         return 1
 
     display = VoiceDisplay(settings.wake_word)
+    voice_model = app.use_voice_model()
+    if voice_model:
+        console.print(Text(f"Voice turns use {voice_model}.", style="dim"))
     session = VoiceSession(app.agent, mic, speaker, endpointer, transcriber, synthesizer, settings, display.handle)
     console.print(Text(f"Loading {transcriber.name} and {synthesizer.name} ...", style="dim"))
     try:

@@ -22,7 +22,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from jarvis.tools.base import ToolResult, tool
-from jarvis.tools.builtin.files import _bad_path, _decode, _fmt_size, _is_binary, _missing, resolve_path
+from jarvis.tools.paths import bad_path as _bad_path
+from jarvis.tools.paths import decode_text as _decode
+from jarvis.tools.paths import format_size as _fmt_size
+from jarvis.tools.paths import is_binary as _is_binary
+from jarvis.tools.paths import known_folder, not_found as _missing, resolve_path
 
 log = logging.getLogger(__name__)
 
@@ -71,9 +75,7 @@ _FONT_DIRS = (
 def _documents_folder() -> Path:
     """The user's Documents folder (may be OneDrive-redirected). Tests patch this."""
     try:
-        from jarvis.agent.prompt import _known_folder
-
-        return _known_folder("Documents")
+        return known_folder("Documents")
     except Exception:  # best effort: fall back to the conventional location
         return Path.home() / "Documents"
 
