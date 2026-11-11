@@ -68,12 +68,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The repository is private, so git (which uv uses for git dependencies) needs the
-      # job's own read-only token to fetch it. Nothing is stored beyond this runner.
-      - name: Let git read this repository
-        shell: bash
-        run: git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
-
       - name: Install Jarvis with install.sh
         if: runner.os == 'Linux'
         run: |

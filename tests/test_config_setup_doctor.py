@@ -419,6 +419,8 @@ def test_old_python_is_fatal(world, tmp_path, monkeypatch):
 
 
 def test_config_file_check(world, tmp_path, monkeypatch):
+    # A developer checkout usually has a real .env; this test is about the per-user file.
+    monkeypatch.setattr("jarvis.config.repo_env_file", lambda: None)
     c = by_name(doctor.run_checks(settings(tmp_path)))["Config file"]
     assert c.status == doctor.WARN and "jarvis --setup" in c.fix
     cfg = Path(os.environ["JARVIS_CONFIG_FILE"])

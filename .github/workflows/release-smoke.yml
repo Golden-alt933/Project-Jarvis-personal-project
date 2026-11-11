@@ -1,0 +1,49 @@
+name: Release smoke test
+
+# Runs the exact one-line install commands from the README on clean machines, the way a
+# new user would: fetched from the public raw URL, with no checkout and no credentials.
+# Triggered when a release is published, and by hand from the Actions tab.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  one-liner:
+    name: one-line install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      JARVIS_NO_SETUP: "1"
+      JARVIS_OLLAMA_AUTOSTART: "false"
+      # not a secret: a placeholder so the configuration check has a key to find; --offline
+      # means it is never sent anywhere
+      NVIDIA_API_KEY: ci-placeholder-not-a-real-key
+    steps:
+      - name: Linux one-liner
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.sh | bash -s -- --system-deps
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Windows one-liner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.ps1 | iex
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.local\bin"
+
+      - name: Installed command works
+        shell: bash
+        run: |
+          jarvis --version
+          jarvis --config-path
+          jarvis --doctor --offline
+          jarvis --browser-token | grep -i "extension folder"

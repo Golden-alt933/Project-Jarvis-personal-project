@@ -627,3 +627,13 @@ def test_system_prompt_local_and_text_variants():
 
 def test_tool_context_import_is_used():
     assert ToolContext is not None
+
+
+async def test_cancel_before_first_read_is_honoured_and_idle_cancel_is_forgotten(store):
+    agent = make_agent(store, ScriptedLLM(["one", "two"]))
+    agent.cancel()  # nothing is running: this must not leak into the next turn
+    assert done(await run(agent, "a")).stopped == "done"
+    stream = agent.run_turn("b")
+    agent.cancel()  # after the turn was started, before its stream is first read
+    events = [ev async for ev in stream]
+    assert done(events).stopped == "cancelled"

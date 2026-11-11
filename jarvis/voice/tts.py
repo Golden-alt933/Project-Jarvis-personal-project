@@ -24,9 +24,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 DEFAULT_VOICE = "en_GB-alan-medium"
-FALLBACK_VOICE = "en_US-lessac-medium"
 # Friday (the previous assistant) shipped this voice; used only if the download fails.
-_FRIDAY_VOICE_DIR = Path(r"C:\Users\HP\Desktop\friday-agent-main\speech\text_to_speech\models")
 
 
 # --------------------------------------------------------------------------- cleanup
@@ -279,7 +277,7 @@ class PiperSynthesizer:
             log.info("Downloading Piper voice %s to %s", self.voice, self.voices_dir)
             download_voice(self.voice, self.voices_dir)
         except Exception as exc:  # network, DNS, bad voice name...
-            log.warning("Voice download failed (%s); trying local fallback voice", exc)
+            log.warning("Voice download failed (%s); looking for an already installed voice", exc)
             for leftover in (model, config):  # a half-written file must not look complete
                 leftover.unlink(missing_ok=True)
             self._copy_fallback()
@@ -289,13 +287,16 @@ class PiperSynthesizer:
         return model
 
     def _copy_fallback(self) -> None:
-        src = _FRIDAY_VOICE_DIR / f"{FALLBACK_VOICE}.onnx"
-        if not src.exists():
-            log.error("No fallback voice found at %s", src)
-            return
-        shutil.copyfile(src, self.model_path)
-        shutil.copyfile(f"{src}.json", f"{self.model_path}.json")
-        log.warning("Using Friday's %s as %s", FALLBACK_VOICE, self.voice)
+        """Offline and the wanted voice is missing: reuse any voice already on disk, so
+        Jarvis can still speak (in the wrong voice) rather than not at all."""
+        for candidate in sorted(self.voices_dir.glob("*.onnx")):
+            config = Path(f"{candidate}.json")
+            if candidate != self.model_path and config.exists():
+                shutil.copyfile(candidate, self.model_path)
+                shutil.copyfile(config, f"{self.model_path}.json")
+                log.warning("Using the installed voice %s in place of %s", candidate.stem, self.voice)
+                return
+        log.error("No voice is installed in %s and the download failed", self.voices_dir)
 
     def _load(self):
         with self._lock:

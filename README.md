@@ -1,5 +1,13 @@
 # Jarvis
 
+[![CI](https://github.com/Golden-alt933/Project-Jarvis-personal-project/actions/workflows/ci.yml/badge.svg)](https://github.com/Golden-alt933/Project-Jarvis-personal-project/actions/workflows/ci.yml)
+
+<p align="center">
+  <img src="docs/images/hud-speaking.png" alt="Jarvis HUD while speaking" width="270">
+  <img src="docs/images/hud-thinking.png" alt="Jarvis HUD while thinking, with a tool running" width="270">
+  <img src="docs/images/hud-confirm.png" alt="Jarvis HUD asking before a risky action" width="270">
+</p>
+
 Jarvis is a personal desktop agent for Windows 11 and Linux. You talk to it in a terminal (or by voice, or through a small HUD window); a language model decides what to do and calls typed tools (files, shell, web, system, memory and so on) to do it. One agent loop handles every request, the whole conversation stays in context, and conversations and saved facts are kept in a local SQLite database so they survive restarts. The default brain is a hosted model behind an OpenAI-compatible API; a local Ollama model is available as a switchable option and as an automatic fallback.
 
 Jarvis is a rebuild of an earlier project, Friday. See `docs/ARCHITECTURE.md` for the design and the reasons behind it.
@@ -222,6 +230,7 @@ Needs the `voice` extra (included by the installers unless `--minimal`). If it i
 
 The microphone stays open for the whole session. Speech is detected locally, transcribed locally, and the transcript goes to the same agent as typed text; replies are spoken sentence by sentence while the model is still writing the rest. The terminal shows the state (idle, listening, thinking, speaking), live level meters, what was heard, the reply as it is spoken, and tool activity. Ctrl+C quits.
 
+- **Model.** On NVIDIA, spoken and HUD turns use a smaller, faster model than text mode (`nvidia/nemotron-3.5-lightning-30b-a3b`, measured at about 1.5 s a step against 2.4 s, with the same pass rate on the tool-use checks). Set `JARVIS_VOICE_MODEL` to choose another, or set `JARVIS_MODEL` explicitly to use one model everywhere.
 - **Wake word.** With `JARVIS_REQUIRE_WAKE_WORD=true` (the default) an utterance is only acted on if it contains the wake word, for example "Jarvis, what time is it?". Saying only "Jarvis" gets a "Yes?" and opens the follow-up window.
 - **Follow-up window.** For `JARVIS_FOLLOWUP_SECONDS` after Jarvis finishes speaking you can answer without the wake word.
 - **Stopping.** "Stop", "cancel", "never mind", "be quiet" or "shut up" cancels the current reply.
@@ -259,7 +268,7 @@ jarvis --hud --no-voice # HUD, typed requests only
 jarvis --hud-demo       # scripted demo: no microphone, no model
 ```
 
-Compact (orb and state word) and expanded (conversation, tool ticker, confirmation card, system gauges, text input) modes; click the orb or press **Ctrl+Alt+J** (Windows) to toggle; **Esc** cancels the current turn. The tray icon offers Show/Hide, mute, new conversation and Quit. On Windows the window is excluded from screen capture by default. On Linux the HUD needs the Qt xcb libraries (the installer lists them); see the platform notes above.
+Compact (orb and state word) and expanded (conversation, tool ticker, confirmation card, system gauges, text input) modes; click the orb or press **Ctrl+Alt+J** (Windows) to toggle; **Esc** cancels the current turn. The tray icon offers Show/Hide, mute, new conversation and Quit. The orb is always in motion and changes colour with the state (cyan standing by and speaking, violet while thinking, amber when asking before a risky action). Measured on a laptop at 125% display scale: about 20% of one CPU core while active, about 8% standing by, nothing while hidden. On Windows the window is excluded from screen capture by default. On Linux the HUD needs the Qt xcb libraries (the installer lists them); see the platform notes above.
 
 ## Privacy
 
@@ -282,7 +291,10 @@ Compact (orb and state word) and expanded (conversation, tool ticker, confirmati
 | "not supported in a Wayland session" | Listing and closing windows needs X11 and `wmctrl`; log in with an X11 session |
 | "install wmctrl" (or another package) | The message names the package; install it with your package manager |
 | HUD does not start on Linux | `jarvis --doctor` and the installer list the Qt xcb libraries; install them |
-| Chrome says the extension cannot connect | Re-run `jarvis --browser-token`, paste the token again, and check the port matches |
+| Chrome says the extension cannot connect | Jarvis must be running (the bridge starts with it). Re-run `jarvis --browser-token`, paste the token again, and check the port matches |
+| Chrome extension behaves oddly after an update | Open `chrome://extensions` and click the reload arrow on Jarvis Browser Control |
+| Jarvis cuts itself off when speaking through laptop speakers | Use headphones, or set `JARVIS_BARGE_IN=wake` |
+| Voice replies are slow | The free hosted tier queues requests; Jarvis says a short filler after 2.5 s. `jarvis --doctor` shows whether speech recognition is on the GPU |
 
 Logs are in the data folder under `logs/jarvis.log`.
 

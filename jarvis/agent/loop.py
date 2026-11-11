@@ -142,7 +142,7 @@ class Agent:
         return self.primary
 
     # -- the turn -------------------------------------------------------------
-    async def run_turn(
+    def run_turn(
         self,
         user_text: str,
         *,
@@ -150,8 +150,23 @@ class Agent:
         notify: Callable[[str], Awaitable[None]] | None = None,
         output_mode: str = "text",
     ) -> AsyncIterator[AgentEvent]:
-        started = time.monotonic()
+        """Start a turn and return its event stream.
+
+        Not itself a generator: the cancel flag is armed here, at call time, so a
+        cancel() that arrives before the stream is first read still stops the turn,
+        while one that arrived earlier, when nothing was running, is forgotten.
+        """
         self._cancel = asyncio.Event()
+        return self._turn_events(user_text, confirm, notify, output_mode)
+
+    async def _turn_events(
+        self,
+        user_text: str,
+        confirm: Callable[[str], Awaitable[bool]] | None,
+        notify: Callable[[str], Awaitable[None]] | None,
+        output_mode: str,
+    ) -> AsyncIterator[AgentEvent]:
+        started = time.monotonic()
         self._cancel_waiter = asyncio.ensure_future(self._cancel.wait())
         turn: _Turn | None = None
         try:
