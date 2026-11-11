@@ -46,8 +46,8 @@ AMBER: Rgb = (1.0, 0.71, 0.33)
 GREEN: Rgb = (0.50, 0.95, 0.72)
 # Base opacity of the glass body. High enough that windows behind it do not compete with the HUD's
 # text; the sheen, wash, hairline and outer glow keep it reading as glass.
-GLASS_OPACITY_TOP = 0.965
-GLASS_OPACITY_BOTTOM = 0.95
+GLASS_OPACITY_TOP = 0.985
+GLASS_OPACITY_BOTTOM = 0.975
 GLASS_INNER_EXTRA = 0.55  # extra opacity of the text surface (0.95 + 0.55 of the rest is about 0.98)
 
 
