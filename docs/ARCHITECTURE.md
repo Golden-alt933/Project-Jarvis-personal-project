@@ -22,7 +22,11 @@ against.
 
 ```
 jarvis/
-  config.py            Settings (env-driven). Data lives in %LOCALAPPDATA%\Jarvis.
+  config.py            Settings and config-file lookup (see "Configuration lookup"). Data lives in the
+                       per-user data folder (%LOCALAPPDATA%\Jarvis, ~/.local/share/jarvis).
+  platform/            OS backends behind one contract (see "Platform layer")
+  doctor.py            `jarvis --doctor`: checklist with a fix per problem
+  setup_wizard.py      `jarvis --setup`: provider, key, name -> per-user config file
   llm/
     types.py           Message, ToolCall, LLMResponse, stream events, errors, LLMClient protocol
     openai_compat.py   One client for every OpenAI-compatible endpoint (NVIDIA, Groq, OpenRouter, Gemini)
@@ -45,11 +49,45 @@ jarvis/
     voice.py           Voice frontend (status display over VoiceEvents)
   voice/               types.py (contracts), audio.py, vad.py, stt.py, tts.py, session.py
   vision/              capture.py, ocr.py (local RapidOCR), client.py (hosted or local vision model)
-  browser/             bridge.py (loopback WebSocket server), policy.py (which page actions ask first)
+  browser/             bridge.py (loopback WebSocket server; extension_dir() finds the extension in a
+                       checkout or inside the installed wheel), policy.py (which page actions ask first)
   proactive/           scheduler.py (reminders that fire without being asked)
 extensions/
-  jarvis-browser-control/   Chrome extension paired with the bridge by a token
+  jarvis-browser-control/   Chrome extension paired with the bridge by a token (copied into the
+                            wheel as jarvis/browser/extension by hatch force-include)
+install.sh, install.ps1     One-command installers (uv tool install at a pinned ref)
+.github/workflows/ci.yml    Tests on Ubuntu and Windows; installer job on both
 ```
+
+## Platform layer (`jarvis/platform/`)
+
+Everything an operating system does differently sits behind the `Platform` protocol in
+`base.py`: running a shell command (and killing its process group or tree), opening a path
+or URL, known folders, the app catalogue and launching, visible windows and closing one,
+the foreground window title, volume/mute, media keys, lock, clipboard availability, protected
+system paths, screen-grab and cursor helpers, Excel COM detection, GPU library loading and the
+helper-program report the doctor prints. `jarvis.platform.current()` picks the backend from
+`sys.platform` once: `windows.py`, `linux.py`, or the base class (macOS and others), whose
+operations raise `PlatformUnsupported` (an `OSError`) with a message that says what is missing.
+Tool modules call the layer and contain no `sys.platform` checks; they turn `OSError` into a
+`ToolResult.fail`, so a missing helper reads as "install wmctrl" rather than a traceback.
+Tests install a fake with `jarvis.platform.set_backend(...)`.
+
+The Linux backend shells out to ordinary helpers: `xdg-open`/`gio`, `.desktop` files for apps
+(`gtk-launch` or the cleaned Exec line), `wmctrl` for windows (X11 only; Wayland reports
+"not supported"), `wpctl`/`pactl`/`amixer` for volume, `playerctl`, `loginctl`/`xdg-screensaver`,
+`xdotool`, `grim`/`gnome-screenshot` for Wayland capture. `run_command` uses `bash -lc` with a
+conservative allowlist classifier (`classify_bash`) next to the PowerShell one; the tool
+description and system prompt name the shell and OS actually in use. Excel recalculation is
+Excel COM on Windows or a headless LibreOffice convert of a temp copy elsewhere (`excel_calc.py`).
+
+## Configuration lookup
+
+First match wins: environment variables, then `<repo>/.env` (only when running from a
+checkout, detected by `pyproject.toml` beside the package), then the per-user file
+(`%APPDATA%\Jarvis\.env`, `${XDG_CONFIG_HOME:-~/.config}/jarvis/.env`, via platformdirs;
+`JARVIS_CONFIG_FILE` overrides it). `jarvis --config-path` prints the file in use and
+`jarvis --setup` writes the per-user file with owner-only permissions.
 
 Data that leaves the machine: every model call sends the conversation and tool results
 to the configured provider. `look_at_screen` and `describe_image` additionally send the
@@ -150,10 +188,10 @@ extraction call per turn.
   a read-only allowlist, closing applications, sending anything on the user's behalf,
   purchases. The frontend's `confirm` callback asks; a failed or missing callback
   means "no".
-- File deletion goes to the Recycle Bin (`send2trash`), never a hard delete.
+- File deletion goes to the Recycle Bin or Trash (`send2trash`), never a hard delete.
 - Web and file content returned by tools is data. The system prompt states that
   instructions inside tool results are not the user's instructions.
-- Secrets live only in `.env` (gitignored) and are never logged.
+- Secrets live only in environment variables and the `.env` config files (gitignored / per-user, mode 0600 where supported) and are never logged or printed.
 
 ## Ported from Friday (MIT, copyright JARVIS Dev Team)
 Logic is ported, not the `Skill.execute(task)` wrappers: file search scoring,

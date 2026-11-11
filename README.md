@@ -1,41 +1,117 @@
 # Jarvis
 
-Jarvis is a personal desktop agent for Windows 11. You talk to it in a terminal; a language model decides what to do and calls typed tools (files, shell, web, system, memory and so on) to do it. One agent loop handles every request, the whole conversation stays in context, and conversations and saved facts are kept in a local SQLite database so they survive restarts. The default brain is a hosted model behind an OpenAI-compatible API; a local Ollama model is available as a switchable option and as an automatic fallback.
+Jarvis is a personal desktop agent for Windows 11 and Linux. You talk to it in a terminal (or by voice, or through a small HUD window); a language model decides what to do and calls typed tools (files, shell, web, system, memory and so on) to do it. One agent loop handles every request, the whole conversation stays in context, and conversations and saved facts are kept in a local SQLite database so they survive restarts. The default brain is a hosted model behind an OpenAI-compatible API; a local Ollama model is available as a switchable option and as an automatic fallback.
 
 Jarvis is a rebuild of an earlier project, Friday. See `docs/ARCHITECTURE.md` for the design and the reasons behind it.
 
-## Requirements
+## Supported platforms
 
-- Windows 11
-- Python 3.13 and [uv](https://docs.astral.sh/uv/)
-- An API key for one supported provider (NVIDIA, Groq, OpenRouter, Gemini, or any OpenAI-compatible endpoint), or [Ollama](https://ollama.com) for a fully local setup
+| Area | Windows 11 | Linux, X11 session | Linux, Wayland session |
+|---|---|---|---|
+| Chat, memory, files, web, notes, reminders | yes | yes | yes |
+| Hosted and local (Ollama) models, Ollama auto-start | yes | yes | yes |
+| `run_command` | PowerShell | bash (`bash -lc`) | bash (`bash -lc`) |
+| Open a file or URL | default handler | `xdg-open`, else `gio open` | same |
+| Documents folders (Desktop, Documents, ...) | Windows shell (follows OneDrive) | `xdg-user-dir`, else `~/Name` | same |
+| Open an app by name | Start Menu, Store apps, stock tools | `.desktop` files; `gtk-launch`, else the Exec line | same |
+| List and close windows | yes | `wmctrl` | not supported (says so) |
+| Volume, mute | yes | `wpctl`, else `pactl`, else `amixer` | same |
+| Media keys | yes | `playerctl` | same |
+| Lock screen | yes | `loginctl`, else `xdg-screensaver` | same |
+| Clipboard | yes | needs `xclip` or `xsel` | needs `wl-clipboard` (or `xclip` via XWayland) |
+| Screen capture, OCR, "look at screen" | yes | yes (`mss`); active monitor needs `xdotool` | `grim`, else `gnome-screenshot` (whole screen) |
+| Foreground window title | yes | `xdotool` | not available |
+| Voice mode | yes (optional NVIDIA GPU) | needs `libportaudio2` and a sound server | same |
+| HUD window | yes | runs under Qt (see note) | not tried |
+| Chrome control extension | yes | same extension | same |
+| Documents (PDF, Word, Markdown) | yes | yes | yes |
+| Excel recalculation | Excel (COM), else built-in evaluator | LibreOffice (`soffice`), else built-in evaluator | same |
+| Delete to Recycle Bin / Trash | Recycle Bin | Trash | Trash |
 
-## Setup
+What "yes" means here: on Windows, the author develops and uses Jarvis there. **The Linux column is implemented and covered by unit tests with the helper programs mocked, and by CI on Ubuntu (tests, installer, `jarvis --doctor`, and a HUD demo under a virtual display). It has not yet been tried on a real Linux desktop**, so expect rough edges with real microphones, sound servers, window managers and `.desktop` files. When a helper program is missing, the tool fails with a message that names the package to install.
 
-```powershell
-uv sync
-copy .env.example .env
+macOS is not a target. Jarvis imports there, but anything that talks to the operating system returns a "not supported" failure.
+
+Notes and gaps:
+
+- Closing apps is graceful (it asks the window to close); Jarvis never kills processes.
+- The HUD's global hotkey, "hide from screenshots" and acrylic effect are Windows-only and fail quietly elsewhere. Its Linux behaviour is only exercised by CI's offscreen tests and a scripted demo.
+- A LibreOffice re-save can change styling that openpyxl never touched; Excel is preferred when both exist.
+- GPU speech recognition needs the `gpu` extra and an NVIDIA GPU (Windows or x86-64 Linux). The Linux library loading for it is untested.
+- PDF creation uses Arial or Segoe UI on Windows and DejaVu Sans on Linux if installed; otherwise the built-in fonts lack some symbols.
+
+## Install
+
+### One command
+
+Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.sh | bash
 ```
 
-Edit `.env`:
+Windows (PowerShell):
 
-- Set `NVIDIA_API_KEY`, or set `JARVIS_PROVIDER` to another provider and fill in its key (`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `CUSTOM_BASE_URL` + `CUSTOM_API_KEY`).
-- For the local option, install Ollama and run `ollama pull qwen3:4b-instruct`.
+```powershell
+irm https://raw.githubusercontent.com/Golden-alt933/Project-Jarvis-personal-project/main/install.ps1 | iex
+```
 
-`.env` is gitignored. Keys are only read from there and are never logged.
+The scripts install [uv](https://docs.astral.sh/uv/) with Astral's official installer if it is missing (they tell you when they do), install Jarvis as a uv tool at a pinned release (`v0.1.0`), and then start `jarvis --setup`. Re-running a script upgrades. Python 3.13 is fetched by uv if you do not have it.
+
+Options for `install.sh` (pass them after `bash -s --`, or save the file and run it): `--minimal` (no extras: text mode only), `--gpu` (add the NVIDIA CUDA libraries), `--ref <tag|branch|commit>`, `--system-deps`. For `install.ps1` set environment variables first, because `irm | iex` cannot take arguments: `JARVIS_REF`, `JARVIS_MINIMAL=1`, `JARVIS_GPU=1`; a saved script also takes `--minimal`, `--gpu`, `--ref`. `JARVIS_NO_SETUP=1` skips the setup step in both.
+
+On Linux the script checks for system libraries and helpers (libportaudio2, xclip or wl-clipboard, wmctrl, playerctl, xdg-utils and the Qt xcb libraries the HUD needs) and **prints** the exact `apt`, `dnf`, `pacman` or `zypper` command for your distribution. It runs it only if you pass `--system-deps`, and then through `sudo` after showing the command. It never uses sudo on its own.
+
+The same thing by hand, with uv installed:
+
+```bash
+uv tool install --python 3.13 "jarvis[all] @ git+https://github.com/Golden-alt933/Project-Jarvis-personal-project@v0.1.0"
+```
+
+Extras: `office` (documents, Excel), `screen` (capture, OCR), `browser` (Chrome bridge), `voice`, `hud`, `gpu` (CUDA libraries), and `all` (everything except `gpu`). To bump the release, change the one marked line (`JARVIS_DEFAULT_REF` / `$DefaultRef`) in each installer when you tag a new version.
+
+### From source
+
+```bash
+git clone https://github.com/Golden-alt933/Project-Jarvis-personal-project
+cd Project-Jarvis-personal-project
+uv sync --all-extras     # or: uv sync --extra all  (without the CUDA libraries)
+uv run jarvis --setup
+```
+
+Requirements: Python 3.13 and uv. An API key for one supported provider (NVIDIA, Groq, OpenRouter, Gemini, or any OpenAI-compatible endpoint), or [Ollama](https://ollama.com) for a fully local setup. A free NVIDIA key comes from <https://build.nvidia.com>.
+
+## First run
+
+```bash
+jarvis --setup     # choose a provider, paste the key (hidden), optional name, then the doctor runs
+jarvis --doctor    # a checklist with a one-line fix for each problem
+jarvis             # chat
+```
+
+`--setup` writes the per-user config file (see below) with permissions only you can read where the OS supports them. The key is never echoed or logged. When stdin is not a terminal it asks nothing and prints what to put in the file instead. For a local setup choose "Ollama only", install Ollama and run `ollama pull qwen3:4b-instruct`.
+
+`--doctor` checks the Python version, config file and key (the key is never printed), whether the hosted model answers (one tiny request, 15 s timeout; skip it with `--offline`), Ollama and the local model, which optional extras are installed, audio devices, speech models, GPU availability for speech, whether the Chrome extension is paired, and on Linux the helper programs. It exits with 0 unless something needed for text mode fails.
 
 ## Running
 
-```powershell
-uv run jarvis                       # interactive; resumes a conversation from the last 12 hours
-uv run jarvis --new                 # start a fresh conversation
-uv run jarvis --local               # use the local Ollama model
-uv run jarvis --once "What time is it?"   # one turn, print the reply, exit
+```bash
+jarvis                              # interactive; resumes a conversation from the last 12 hours
+jarvis --new                        # start a fresh conversation
+jarvis --local                      # use the local Ollama model
+jarvis --once "What time is it?"    # one turn, print the reply, exit
 python -m jarvis                    # same as `jarvis`
 ```
 
+(From a checkout, prefix with `uv run`.)
+
 | Flag | Meaning |
 |---|---|
+| `--setup` | First-run setup (provider, key, name), then the doctor |
+| `--doctor` | Check the installation and configuration |
+| `--offline` | With `--doctor` or `--setup`: do not contact the hosted model |
+| `--config-path` | Print the config file in use and exit |
+| `--version` | Print the version and exit |
 | `--local` | Use the local Ollama model as the main model |
 | `--new` | Do not resume the latest conversation |
 | `--once "text"` | Run a single turn non-interactively. Confirmations are denied unless `--yes` is given |
@@ -44,10 +120,12 @@ python -m jarvis                    # same as `jarvis`
 | `--model ID` | Override `JARVIS_MODEL` for this run |
 | `--verbose` | Show full tool arguments and a preview of each result |
 | `--voice` | Voice mode (see below) |
+| `--hud`, `--hud-demo`, `--no-voice` | The HUD window (see below) |
 | `--devices` | List audio input/output devices and exit |
+| `--browser-token` | Print the Chrome extension pairing token and folder, then exit |
 | `--no-wake` | Voice mode: every utterance is addressed to Jarvis, no wake word needed |
 
-If the configuration is invalid, Jarvis says which variable to set in `.env` and exits with code 2.
+If no key is configured, Jarvis says so, points to `jarvis --setup`, and exits with code 2.
 
 ### Slash commands
 
@@ -64,78 +142,192 @@ If the configuration is invalid, Jarvis says which variable to set in `.env` and
 
 Ctrl+C during a reply cancels it and returns to the prompt. Alt+Enter inserts a newline; pasted multi-line text is sent as one message.
 
-Tools marked `confirm` (deleting or overwriting files, most shell commands, and similar) show what they are about to do and ask `Allow? [y/N]`. The default is No.
+Tools marked `confirm` (deleting or overwriting files, most shell commands, and similar) show what they are about to do and ask `Allow? [y/N]`. The default is No. `run_command` runs without asking only for a single read-only command on a short allowlist (PowerShell cmdlets on Windows; `ls`, `cat`, `grep`, `find` without `-delete`/`-exec`, `git status`, and so on in bash); anything with `;`, `&&`, redirection, `$(...)`, `sudo` and the like asks first.
 
-## Voice mode
+## Configuration
 
-Install the optional dependencies (microphone and speaker access, speech recognition, speech synthesis), then start it:
+Settings are read in this order, first match wins:
 
-```powershell
-uv sync --extra voice
-uv run jarvis --voice          # add --no-wake to skip the wake word
-uv run jarvis --devices        # find device names for JARVIS_INPUT_DEVICE / JARVIS_OUTPUT_DEVICE
-```
+1. environment variables,
+2. `<repo>/.env`, only when running from a source checkout,
+3. the per-user config file: `%APPDATA%\Jarvis\.env` on Windows, `${XDG_CONFIG_HOME:-~/.config}/jarvis/.env` on Linux.
 
-If the extra is not installed, `--voice` prints this install command and exits with code 2.
+`jarvis --config-path` prints the file in use. (`JARVIS_CONFIG_FILE` points Jarvis at a different per-user file; the test suite uses it.) Choose the provider and model with `JARVIS_PROVIDER` (`nvidia`, `groq`, `openrouter`, `gemini`, `ollama`, `custom`) and optionally `JARVIS_MODEL`; the defaults live in `jarvis/llm/providers.py`. A provider with no default model and no `JARVIS_MODEL` is a configuration error.
 
-The microphone stays open for the whole session. Speech is detected locally, transcribed locally, and the transcript goes to the same agent as typed text; replies are spoken sentence by sentence while the model is still writing the rest. The terminal shows the state (idle, listening, thinking, speaking), live mic and output level meters, what was heard (dimmed when it was not meant for Jarvis), the reply as it is spoken, and tool activity. Ctrl+C quits.
+### Reference
 
-- **Wake word.** With `JARVIS_REQUIRE_WAKE_WORD=true` (the default) an utterance is only acted on if it contains the wake word, for example "Jarvis, what time is it?". Common mis-hearings of "jarvis" ("travis", "jervis") are accepted at the start of a sentence. Saying only "Jarvis" gets a "Yes?" and opens the follow-up window.
-- **Follow-up window.** For `JARVIS_FOLLOWUP_SECONDS` after Jarvis finishes speaking (or after your last command) you can answer without the wake word.
-- **Stopping.** "Stop", "cancel", "never mind", "be quiet" or "shut up" cancels the current reply silently.
-- **Confirmations.** Risky actions are asked aloud ("Shall I go ahead and ...? Say yes or no."). Only a clear yes approves; anything else, silence for 15 seconds, or an unclear transcript means no.
-- **Reminders.** Reminders set through Jarvis are spoken when they fall due (checked every 20 seconds), once Jarvis is idle. In the text interface they are printed.
-
-### Barge-in
-
-`JARVIS_BARGE_IN` decides what happens when you speak while Jarvis is thinking or talking:
-
-| Mode | Behaviour |
-|---|---|
-| `vad` (default) | Speaking over Jarvis interrupts him immediately; what you say becomes the next request without the wake word. Mic input must be louder than the echo expected from the speakers. |
-| `wake` | Only an utterance containing the wake word interrupts. |
-| `off` | The microphone is ignored while Jarvis works or speaks, except for stop phrases. |
-
-`vad` mode works best with headphones. On laptop speakers Jarvis's own voice leaks into the microphone; the echo gate copes with moderate leakage, but if Jarvis keeps cutting himself off or mistaking his voice for yours, use `JARVIS_BARGE_IN=wake`. A false trigger just returns Jarvis to idle; he does not resume the old reply.
-
-### Voice settings
-
+<!-- config-table:start (every setting in jarvis/config.py; tests/test_readme.py checks this) -->
 | Variable | Default | Meaning |
 |---|---|---|
+| `JARVIS_PROVIDER` | `nvidia` | `nvidia`, `groq`, `openrouter`, `gemini`, `ollama` or `custom` |
+| `JARVIS_MODEL` | empty | Model id; empty uses the provider's default |
+| `JARVIS_FAST_MODEL` | empty | Smaller model on the same provider for background jobs |
+| `JARVIS_TEMPERATURE` | `0.3` | Sampling temperature |
+| `JARVIS_MAX_OUTPUT_TOKENS` | `4096` | Maximum tokens per model reply |
+| `JARVIS_REQUEST_TIMEOUT` | `90.0` | Seconds before a model request times out |
+| `JARVIS_FIRST_BYTE_TIMEOUT` | `25.0` | A streaming request silent this long is retried once; 0 disables |
+| `JARVIS_VOICE_MODEL` | empty | Faster model for voice and HUD (same provider); empty uses the default |
+| `NVIDIA_API_KEY` | empty | Key for the `nvidia` provider |
+| `GROQ_API_KEY` | empty | Key for `groq` |
+| `OPENROUTER_API_KEY` | empty | Key for `openrouter` |
+| `GEMINI_API_KEY` | empty | Key for `gemini` |
+| `CUSTOM_BASE_URL` | empty | Base URL for `custom` (OpenAI-compatible) |
+| `CUSTOM_API_KEY` | empty | Key for `custom` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server |
+| `OLLAMA_MODEL` | `qwen3:4b-instruct` | Local model |
+| `OLLAMA_NUM_CTX` | `16384` | Local context window |
+| `JARVIS_LOCAL_FALLBACK` | `true` | Fall back to the local model when the cloud is unreachable |
+| `JARVIS_OLLAMA_AUTOSTART` | `true` | Start `ollama serve` (loopback only, once) when it is not running |
+| `JARVIS_USER_NAME` | empty | What Jarvis calls you |
+| `JARVIS_MAX_STEPS` | `25` | Tool-call steps per turn |
+| `JARVIS_TURN_TIME_BUDGET` | `600.0` | Seconds per turn |
+| `JARVIS_HISTORY_TOKEN_BUDGET` | `24000` | History is summarised above this many tokens |
+| `JARVIS_TOOL_RESULT_MAX_CHARS` | `12000` | Tool results are truncated beyond this |
+| `JARVIS_LOCAL_TOOL_GROUPS` | `core,files,web,memory` | Tool groups offered to a small local model |
 | `JARVIS_WAKE_WORD` | `jarvis` | The word that addresses Jarvis |
 | `JARVIS_REQUIRE_WAKE_WORD` | `true` | `false` treats every utterance as addressed (same as `--no-wake`) |
-| `JARVIS_FOLLOWUP_SECONDS` | `10` | Follow-up window length |
+| `JARVIS_FOLLOWUP_SECONDS` | `10.0` | Follow-up window length |
 | `JARVIS_END_SILENCE_MS` | `650` | Silence that ends an utterance |
 | `JARVIS_BARGE_IN` | `vad` | `vad`, `wake` or `off` |
 | `JARVIS_STT_MODEL` | `auto` | Whisper model: `auto`, `tiny.en`, `base.en`, `small.en`, ... |
 | `JARVIS_STT_DEVICE` | `auto` | `auto`, `cuda` or `cpu` |
 | `JARVIS_TTS_VOICE` | `en_GB-alan-medium` | Piper voice |
 | `JARVIS_TTS_SPEED` | `1.0` | Speech speed multiplier |
-| `JARVIS_INPUT_DEVICE`, `JARVIS_OUTPUT_DEVICE` | empty | Device name or index; empty is the system default |
+| `JARVIS_INPUT_DEVICE` | empty | Microphone name or index; empty is the system default |
+| `JARVIS_OUTPUT_DEVICE` | empty | Speaker name or index; empty is the system default |
+| `JARVIS_VISION_PROVIDER` | `auto` | `auto`, `cloud` or `local`; `local` keeps images on this machine |
+| `JARVIS_VISION_MODEL` | empty | Hosted vision model; empty uses the provider default |
+| `OLLAMA_VISION_MODEL` | `qwen2.5vl:3b` | Local vision model |
+| `JARVIS_BROWSER_PORT` | `8765` | Loopback port for the Chrome extension bridge |
+| `JARVIS_DATA_DIR` | empty | Data folder; empty uses the per-user default below |
+<!-- config-table:end -->
 
-## Choosing the provider and model
+### Where data and config live
 
-Set `JARVIS_PROVIDER` (`nvidia`, `groq`, `openrouter`, `gemini`, `ollama` or `custom`) and optionally `JARVIS_MODEL` in `.env`. If `JARVIS_MODEL` is empty, the provider's default is used; the default model is set in `jarvis/llm/providers.py`. `JARVIS_FAST_MODEL` can name a smaller model on the same provider for background jobs such as summarising old context. A provider with no default model (and no `JARVIS_MODEL`) is reported as a configuration error.
+| | Windows | Linux |
+|---|---|---|
+| Config file | `%APPDATA%\Jarvis\.env` | `${XDG_CONFIG_HOME:-~/.config}/jarvis/.env` |
+| Data folder | `%LOCALAPPDATA%\Jarvis` | `${XDG_DATA_HOME:-~/.local/share}/jarvis` |
 
-## Local fallback
+`JARVIS_DATA_DIR` overrides the data folder. It holds `jarvis.db` (conversations, summaries, facts; SQLite), `history.txt` (prompt history), `logs/jarvis.log` (rotating; keys and request bodies are never logged), `voices/` (speech voices), `browser-token` (Chrome pairing token) and `hud.json`. Whisper models are cached by Hugging Face under `~/.cache/huggingface` (or `HF_HOME`).
 
-When the provider is a cloud one and `JARVIS_LOCAL_FALLBACK` is true (the default), Jarvis switches to the local Ollama model for the rest of a turn if the cloud provider cannot be reached before any text arrived, and tells you it did. A small local model is only offered the tool groups in `JARVIS_LOCAL_TOOL_GROUPS` (default `core,files,web,memory`). Set `JARVIS_LOCAL_FALLBACK=false` to disable this. At startup Jarvis warns if Ollama is not running or the model is not pulled.
+## Voice mode
 
-## Where data is stored
+```bash
+jarvis --voice          # add --no-wake to skip the wake word
+jarvis --devices        # find device names for JARVIS_INPUT_DEVICE / JARVIS_OUTPUT_DEVICE
+```
 
-By default in `%LOCALAPPDATA%\Jarvis` (override with `JARVIS_DATA_DIR`):
+Needs the `voice` extra (included by the installers unless `--minimal`). If it is missing, `--voice` prints the install command and exits with code 2. On Linux it also needs the system library `libportaudio2` and a running sound server; the doctor reports either problem. Speech models download on first use.
 
-- `jarvis.db` - conversations, summaries and saved facts (SQLite)
-- `history.txt` - prompt input history
-- `logs/jarvis.log` - rotating log file; nothing is logged to the console
+The microphone stays open for the whole session. Speech is detected locally, transcribed locally, and the transcript goes to the same agent as typed text; replies are spoken sentence by sentence while the model is still writing the rest. The terminal shows the state (idle, listening, thinking, speaking), live level meters, what was heard, the reply as it is spoken, and tool activity. Ctrl+C quits.
 
-## Adding a tool
+- **Wake word.** With `JARVIS_REQUIRE_WAKE_WORD=true` (the default) an utterance is only acted on if it contains the wake word, for example "Jarvis, what time is it?". Saying only "Jarvis" gets a "Yes?" and opens the follow-up window.
+- **Follow-up window.** For `JARVIS_FOLLOWUP_SECONDS` after Jarvis finishes speaking you can answer without the wake word.
+- **Stopping.** "Stop", "cancel", "never mind", "be quiet" or "shut up" cancels the current reply.
+- **Confirmations.** Risky actions are asked aloud. Only a clear yes approves; anything else, silence for 15 seconds, or an unclear transcript means no.
+- **Reminders.** Reminders are spoken when they fall due, once Jarvis is idle; in the text interface they are printed.
+- **Barge-in** (`JARVIS_BARGE_IN`): `vad` (default) lets you interrupt by speaking, best with headphones; `wake` needs the wake word to interrupt (use it on loud speakers); `off` ignores the microphone while Jarvis speaks, except stop phrases.
 
-A tool is a typed function in `jarvis/tools/builtin/`. The JSON schema the model sees is generated from the signature and docstring. Every module in that folder is loaded at startup.
+## Chrome control
+
+Jarvis can browse in your own Chrome, signed in as you, through the Jarvis Browser Control extension. It can open pages, read them, list their links, buttons and fields, click, type, fill forms, scroll, take screenshots and attach files. It only touches tabs in a cyan tab group named **JARVIS**.
+
+The extension ships inside the installed package. Set up once:
+
+1. Run `jarvis --browser-token`. It prints the pairing token and the extension folder.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose that folder.
+3. Click the extension's toolbar icon, paste the token, leave the port at `8765` (match `JARVIS_BROWSER_PORT` if you changed it) and click **Save and connect**.
+
+Jarvis listens on `127.0.0.1` only, for `chrome-extension://` origins, with the token required. Safety policy: reading, navigating, scrolling, clicking and typing run without asking; Jarvis asks before buying, paying, sending, posting, deleting, signing in, account changes, accepting terms and uploading files, and never types into password, card or one-time-code fields. Page text is treated as data, never as instructions.
+
+## Documents, spreadsheets and the screen
+
+Installed by the `office` and `screen` extras.
+
+- **Documents:** read PDF, Word, Markdown and HTML; create Markdown, HTML, PDF or Word documents; merge, split, extract, rotate and fill PDFs. New files only: nothing existing is overwritten.
+- **Excel:** overview, read ranges, write cells and formulas, append rows, create workbooks, column totals and lookups. Writes to an existing workbook ask first and keep a `.bak`. openpyxl cannot calculate formulas, so after a write the workbook is recalculated in a private hidden Excel (Windows, with pywin32), or by a headless LibreOffice on a temp copy (any OS with `soffice`), swapped in only if the result is valid. With neither, Jarvis's built-in evaluator calculates values when reading, and Excel stores them the next time the file is saved there.
+- **Screen:** `read_screen_text` runs OCR locally. `look_at_screen` and `describe_image` send the image to a vision model: a hosted one on the configured key, falling back to the local Ollama vision model. Set `JARVIS_VISION_PROVIDER=local` to keep images on this machine.
+
+## HUD
+
+A translucent, always-on-top glass interface with an orb that reacts to the microphone and speaker levels.
+
+```bash
+jarvis --hud            # HUD with voice
+jarvis --hud --no-voice # HUD, typed requests only
+jarvis --hud-demo       # scripted demo: no microphone, no model
+```
+
+Compact (orb and state word) and expanded (conversation, tool ticker, confirmation card, system gauges, text input) modes; click the orb or press **Ctrl+Alt+J** (Windows) to toggle; **Esc** cancels the current turn. The tray icon offers Show/Hide, mute, new conversation and Quit. On Windows the window is excluded from screen capture by default. On Linux the HUD needs the Qt xcb libraries (the installer lists them); see the platform notes above.
+
+## Privacy
+
+- Every model call sends the conversation and tool results to the configured provider. Nothing else about your machine is sent unless a tool reads it and its result enters the conversation.
+- `look_at_screen` and `describe_image` send the image to a hosted vision model unless `JARVIS_VISION_PROVIDER=local`.
+- OCR, speech recognition and speech synthesis run locally (models are downloaded once from their hosts).
+- Keys live in environment variables or the config files above and are never logged. The doctor and setup never print them.
+- To keep everything on the machine: `JARVIS_PROVIDER=ollama` (or `jarvis --local`), `JARVIS_VISION_PROVIDER=local`. Web search and page-reading tools still reach the internet when you use them.
+- Memory (facts, conversations) is a local SQLite file; `/memory` lists it and `/forget <id>` deletes an entry.
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| "Jarvis is not configured" | `jarvis --setup`, then `jarvis --doctor` |
+| `jarvis: command not found` after installing | The tool folder is not on PATH: run `uv tool update-shell` and open a new terminal |
+| Hosted model unreachable | `jarvis --doctor` shows the HTTP status; check the key and network, or use `jarvis --local` |
+| Ollama "not running" | `ollama serve`, then `ollama pull qwen3:4b-instruct` |
+| Voice: no devices, or PortAudio errors on Linux | Install `libportaudio2`, make sure PipeWire or PulseAudio runs, check `jarvis --devices` |
+| "not supported in a Wayland session" | Listing and closing windows needs X11 and `wmctrl`; log in with an X11 session |
+| "install wmctrl" (or another package) | The message names the package; install it with your package manager |
+| HUD does not start on Linux | `jarvis --doctor` and the installer list the Qt xcb libraries; install them |
+| Chrome says the extension cannot connect | Re-run `jarvis --browser-token`, paste the token again, and check the port matches |
+
+Logs are in the data folder under `logs/jarvis.log`.
+
+## Uninstall
+
+```bash
+uv tool uninstall jarvis
+```
+
+This removes the program. Your data stays until you delete it: the config file and data folder listed under "Where data and config live" (conversations, saved facts, voices, the Chrome pairing token). Remove the Chrome extension from `chrome://extensions`. `uv` itself stays installed.
+
+## Development
+
+```bash
+uv sync --all-extras
+uv run pytest -q
+```
+
+CI (`.github/workflows/ci.yml`) runs the suite on Ubuntu and Windows with Python 3.13, runs `shellcheck install.sh`, and in a second job runs the real installers on clean runners (`jarvis --version`, `jarvis --doctor --offline`, and on Ubuntu `jarvis --hud-demo` under a virtual display). The Linux tests mock the helper programs, so they check parsing and fallbacks rather than a real desktop. Tests that cannot run on an OS are skipped with a reason (for example Windows file-sharing modes, or SAPI speech synthesis).
+
+Project layout:
+
+```
+jarvis/
+  config.py        Settings and config lookup
+  doctor.py        jarvis --doctor
+  setup_wizard.py  jarvis --setup
+  platform/        OS backends: windows.py, linux.py, base.py (the contract)
+  llm/             Provider clients: OpenAI-compatible and native Ollama
+  tools/           @tool decorator, registry, builtin/ tool modules
+  memory/          SQLite store
+  agent/           The agent loop, prompt, context compaction, events
+  interfaces/      app.py (wiring), cli.py, voice.py, hud.py
+  voice/ vision/ browser/ hud/ proactive/
+extensions/jarvis-browser-control/   Chrome extension (also packaged inside the wheel)
+install.sh, install.ps1              One-command installers
+```
+
+### Adding a tool
+
+A tool is a typed function in `jarvis/tools/builtin/`. The JSON schema the model sees is generated from the signature and docstring; every module in that folder is loaded at startup. Anything that differs between operating systems goes through `jarvis.platform.current()`, never `sys.platform` checks in the tool.
 
 ```python
 # jarvis/tools/builtin/greeting.py
-from jarvis.tools.base import Risk, ToolContext, ToolResult, tool
+from jarvis.tools.base import ToolResult, tool
 
 
 @tool(group="core")
@@ -146,82 +338,14 @@ async def word_count(text: str) -> ToolResult:
         text: The text to count words in.
     """
     return ToolResult.success(f"{len(text.split())} words")
-
-
-@tool(group="files", risk=Risk.CONFIRM)
-async def create_note(title: str, ctx: ToolContext) -> ToolResult:
-    """Create an empty note file in the data directory.
-
-    Args:
-        title: File name without extension.
-    """
-    path = ctx.settings.data_dir / f"{title}.txt"
-    path.touch()
-    return ToolResult.success(f"Created {path}")
 ```
 
-`ctx` is injected and hidden from the model. Use `Risk.CONFIRM` for anything destructive or arbitrary. Return `ToolResult.fail(error, hint=...)` for expected failures instead of raising. See the docstring of `jarvis/tools/base.py` for the full rules.
-
-## Project layout
-
-```
-jarvis/
-  config.py        Settings (env-driven)
-  llm/             Provider clients: OpenAI-compatible and native Ollama
-  tools/           @tool decorator, registry, builtin/ tool modules
-  memory/          SQLite store: conversations, summaries, facts
-  agent/           The agent loop, prompt, context compaction, events
-  interfaces/      app.py (wiring), cli.py (terminal frontend), voice.py (voice frontend)
-  voice/           Audio I/O, VAD, speech-to-text, text-to-speech, the voice session
-  proactive/       Reminder watcher (Jarvis speaking first)
-docs/              Architecture notes
-tests/             pytest suite (no network needed)
-```
-
-Run the tests with `uv run pytest`.
-
-## Chrome control
-
-Jarvis can browse in your own Chrome, signed in as you, through the Jarvis Browser Control extension. It can open pages, read them, list their links, buttons and fields, click, type, fill forms, scroll, take screenshots and attach files. It only ever touches tabs in a cyan tab group named **JARVIS**; your other tabs are never read or changed.
-
-Set up once:
-
-1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the `extensions/jarvis-browser-control` folder.
-2. Run `jarvis --browser-token`. It prints the pairing token and the folder path.
-3. Click the extension's toolbar icon, paste the token, leave the port at `8765` (match `JARVIS_BROWSER_PORT` if you changed it) and click **Save and connect**.
-
-Jarvis starts listening (on `127.0.0.1` only, for `chrome-extension://` origins, with the token required) the first time it uses a browser tool, and the extension reconnects on its own after that. Ask Jarvis "is Chrome connected?" to check; if it is not, it tells you what to do. If the port is taken, change `JARVIS_BROWSER_PORT` and the port in the popup.
-
-Safety policy: reading, navigating, scrolling, clicking and typing run without asking. Jarvis asks you first before anything consequential: buying or paying, sending or posting, deleting, signing in or authorising, account or security changes, accepting terms, and uploading a file. It will not type into password, card number, CVV, one-time-code or similar fields at all; you enter those yourself. Only `http` and `https` pages are opened. Page text is treated as data, never as instructions.
-
-While Jarvis clicks or types, Chrome shows a "Jarvis Browser Control started debugging this browser" banner; it disappears when the action finishes. That is how real mouse and keyboard events are sent.
-
-## Documents, spreadsheets and the screen
-
-Installed with `uv sync --all-extras` (or `--extra office --extra screen`).
-
-- **Documents:** read PDF, Word, Markdown and HTML; create Markdown, HTML, PDF or Word documents; merge, split, extract, rotate and fill PDFs. New files only: nothing existing is overwritten.
-- **Excel:** overview, read ranges, write cells and formulas, append rows, create workbooks, column totals and lookups. Writes to an existing workbook ask first and keep a `.bak`. openpyxl cannot calculate formulas, so a formula's value appears when the file is next opened in Excel.
-- **Screen:** `read_screen_text` runs OCR locally (about 5 s for a 1080p screen). `look_at_screen` and `describe_image` send the image to a vision model. By default that is a hosted model on the configured key, falling back to the local Ollama vision model; set `JARVIS_VISION_PROVIDER=local` to keep images on this machine.
-
-## HUD
-
-A translucent, always-on-top glass interface with a living orb that reacts to the real microphone and speaker levels.
-
-```
-uv sync --extra hud
-uv run jarvis --hud            # HUD with voice
-uv run jarvis --hud --no-voice # HUD, typed requests only
-uv run jarvis --hud-demo       # scripted demo: no microphone, no model
-```
-
-- **Compact** (orb and state word, docked bottom-right) and **expanded** (conversation, tool ticker, confirmation card, CPU/memory/GPU/battery gauges, text input). Click the orb or press **Ctrl+Alt+J** to toggle. **Esc** cancels the current turn. Drag from any empty area; the position and mode are remembered in `hud.json` in the data directory.
-- The tray icon offers Show/Hide, Compact/Expanded, Mute microphone, New conversation, Use local/cloud model, Hide from screenshots and Quit.
-- The window is excluded from screen capture by default, so screenshots Jarvis takes of your screen do not contain the HUD. Turn that off from the tray menu.
-- Risky actions show a confirmation card with Allow and Deny; you can still answer by voice.
+`ctx` (a `ToolContext`) is injected and hidden from the model. Use `risk=Risk.CONFIRM` for anything destructive or arbitrary. Return `ToolResult.fail(error, hint=...)` for expected failures. See `jarvis/tools/base.py` for the full rules.
 
 ## Roadmap
 
+- Try the Linux backend on real desktops (X11 and Wayland) and fix what that finds
+- Window listing on Wayland compositors
 - Keyboard and window control for desktop apps
 - Email and calendar
 
