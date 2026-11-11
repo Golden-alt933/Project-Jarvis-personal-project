@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from jarvis.voice.events import (
+    CodeShown,
     ConfirmRequested,
     ConfirmResolved,
     Heard,
@@ -79,6 +80,10 @@ class HudController:
                 self._begin("")
             self.spoke_in_exchange = True
             v.reply.append_reply(event.text)
+        elif isinstance(event, CodeShown):
+            if not self.exchange_open:
+                self._begin("")
+            v.show_code(event.code, event.language)
         elif isinstance(event, ToolActivity):
             self._tool(event)
         elif isinstance(event, Info):
@@ -99,6 +104,11 @@ class HudController:
 
     def _begin(self, user_text: str) -> None:
         self.view.reply.begin_exchange(user_text)
+        if self.view.code.blocks:
+            self.view.code.clear()
+            relayout = getattr(self.view, "_layout", None)
+            if relayout is not None:
+                relayout()
         self.exchange_open = True
         self.spoke_in_exchange = False
         self.view.ticker.clear()

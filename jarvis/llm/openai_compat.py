@@ -299,6 +299,7 @@ class OpenAICompatClient:
         self.streaming = streaming
         self._api_key = api_key
         self._first_byte_timeout = first_byte_timeout
+        self._streams: dict[int, Any] = {}  # open stream iterator id -> its response
         self._extra_body = dict(extra_body or {})
         self._extra_params = dict(extra_params or {})
         self._client = openai.AsyncOpenAI(
@@ -344,6 +345,7 @@ class OpenAICompatClient:
         response = await self._open(req)
         opened.append(response)
         iterator = response.__aiter__()
+        self._streams[id(iterator)] = response  # so an abandoned stream can be closed properly
         return iterator, await anext(iterator, _END)
 
     async def _first_chunk(self, req: dict[str, Any]) -> tuple[Any, Any]:
@@ -374,17 +376,18 @@ class OpenAICompatClient:
             await self._abandon(iterator)
             raise LLMUnavailable(f"{self.model} stopped sending mid-reply for {limit:g}s.") from None
 
-    @staticmethod
-    async def _abandon(iterator: Any) -> None:
-        for name in ("aclose", "close"):
-            closer = getattr(iterator, name, None)
-            if closer is not None:
-                with contextlib.suppress(Exception):
-                    await closer()
-                return
+    async def _abandon(self, iterator: Any) -> None:
+        """Drop a stream that is being given up on: close the HTTP response under it, which
+        ends the iterator cleanly (closing the iterator itself mid-read does not)."""
+        response = self._streams.pop(id(iterator), None)
+        closer = getattr(response, "close", None) if response is not None else None
+        if closer is not None:
+            with contextlib.suppress(Exception):
+                await closer()
 
     async def _stream_once(self, req: dict[str, Any]) -> AsyncIterator[StreamEvent]:
         assembler = ChunkAssembler(self.model)
+        iterator: Any = None
         try:
             iterator, chunk = await self._first_chunk(req)
             started, spoke = time.monotonic(), False
@@ -396,6 +399,8 @@ class OpenAICompatClient:
                 chunk = await self._next_chunk(iterator, started, spoke)
         except openai.OpenAIError as exc:
             raise map_openai_error(exc, self._api_key) from None
+        finally:
+            self._streams.pop(id(iterator), None) if iterator is not None else None
         tail, final = assembler.finish()
         for text in tail:
             yield TextDelta(text)

@@ -112,8 +112,10 @@ _OUTPUT = {
         "minutes past midnight', 'the eleventh of November', 'about twelve gigabytes', not "
         "'00:07' or '11/11/2026'. Listening is slower than reading, so answer in one to three "
         "sentences: give the conclusion and the one or two figures that matter, then stop. "
-        "The user can ask for the rest. Do not read out code, URLs or long file paths; say what it is and offer "
-        "to show it on screen instead."
+        "The user can ask for the rest. Do not read out URLs or long file paths; say what it is instead. "
+        "When the answer includes code, write the code in a fenced code block: the block is shown on the "
+        "user's screen exactly as written and is not spoken, so say in one sentence what it does and "
+        "that it is on screen."
     ),
     "text": (
         "You are chatting in a terminal. Keep replies concise; light Markdown is fine "
@@ -144,6 +146,21 @@ _WEBSITES = (
 )
 
 
+_CODE_HELP = (
+    "Helping with code the user is working on (their editor, or an online judge such as NeetCode or "
+    "LeetCode). Start with one copy_text call: it returns their code exactly as it is in the editor "
+    "and the page's own text (the problem statement, examples, error messages). Work from that; do not "
+    "search the web or open other pages for the problem, and use look_at_screen only if something is "
+    "still missing. Then call review_code with that code and the page's text as the task, and base "
+    "your answer on its result: it finds defects a quick read misses. Do not run code or commands "
+    "to test it unless the user asks. Say what is wrong in a sentence or "
+    "two, and always give the code itself in a fenced block with its language, never a description "
+    "of it. When the user asks you to write, type, fix or fill it in for them, do it: call paste_text "
+    "with the complete corrected code and replace_all=true so it replaces their solution. Never use "
+    "desktop_type for code, because editors re-indent typed text. Do not press Run or Submit unless asked."
+)
+
+
 def build_system_prompt(
     *,
     settings: "Settings",
@@ -163,6 +180,8 @@ def build_system_prompt(
     ]
     if tool_groups is not None and "browser" in set(tool_groups):
         sections.append(_WEBSITES)  # only when the browser tools are on offer this turn
+    if tool_groups is not None and "desktop" in set(tool_groups):
+        sections.append(_CODE_HELP)  # only when paste_text and copy_text are on offer
     if is_local:
         sections.append(_LOCAL)
     return "\n\n".join(sections)

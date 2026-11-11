@@ -190,6 +190,22 @@ async def test_cloud_failure_falls_back_to_local_and_says_so():
     assert [u.endswith("/api/chat") for u, _, _ in rec.requests] == [False, True]
 
 
+async def test_a_busy_hosted_model_is_tried_once_more_before_the_local_one():
+    rec = Recorder(cloud=(503, ""))
+    answer = await client_with(rec).ask(make_image(), "q")
+    assert answer.path == "local"
+    assert [u.endswith("/api/chat") for u, _, _ in rec.requests] == [False, False, True]  # hosted twice, then local
+
+
+async def test_no_local_model_is_loaded_when_local_fallback_is_off():
+    assert build_vision_client(make_settings(local_fallback=False)).order() == ["cloud"]
+    assert build_vision_client(make_settings(local_fallback=False, vision_provider="local")).order() == ["local"]
+    rec = Recorder(cloud=(404, ""))
+    with pytest.raises(VisionError):
+        await client_with(rec, local_fallback=False).ask(make_image(), "q")
+    assert not any(u.endswith("/api/chat") for u, _, _ in rec.requests)
+
+
 async def test_local_mode_does_not_try_cloud_when_local_fails():
     rec = Recorder(local=(404, ""))
     with pytest.raises(VisionError, match="local"):

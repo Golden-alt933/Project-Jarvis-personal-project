@@ -14,6 +14,7 @@ from jarvis.interfaces.app import App
 from jarvis.proactive.runtime import Background, start_background
 from jarvis.proactive.scheduler import ReminderWatcher
 from jarvis.voice.session import (
+    CodeShown,
     ConfirmRequested,
     ConfirmResolved,
     Heard,
@@ -58,6 +59,7 @@ class VoiceDisplay:
         self.speaker = 0.0
         self.heard: Heard | None = None
         self.reply: list[str] = []
+        self.code: list[CodeShown] = []  # code blocks of the current reply, shown as written
         self.tools: deque[str] = deque(maxlen=4)
         self.info = ""
         self.muted = False
@@ -68,6 +70,7 @@ class VoiceDisplay:
         if isinstance(event, StateChanged):
             if event.state is VoiceState.THINKING:
                 self.reply.clear()
+                self.code.clear()
                 self.tools.clear()
                 self.footer = ""
             self.state = event.state
@@ -87,6 +90,8 @@ class VoiceDisplay:
             self.footer = f"{event.seconds:.1f}s, {event.tool_calls} tool calls, {event.model}"
         elif isinstance(event, Spoke):
             self.reply.append(event.text)
+        elif isinstance(event, CodeShown):
+            self.code.append(event)
         elif isinstance(event, ToolActivity):
             self._tool(event)
         elif isinstance(event, Info):
@@ -115,6 +120,9 @@ class VoiceDisplay:
             lines.append(Text(tool, style="dim"))
         if self.reply:
             lines.append(Text(f"  jarvis: {' '.join(self.reply)}", style="bold"))
+        for block in self.code:
+            lines.append(Text(f"  code ({block.language or 'text'}):", style="dim"))
+            lines.extend(Text("    " + line, style="cyan") for line in block.code.splitlines())
         if self.confirm:
             lines.append(Text(f"  confirm? {self.confirm} (say yes or no)", style="bold yellow"))
         if self.footer:

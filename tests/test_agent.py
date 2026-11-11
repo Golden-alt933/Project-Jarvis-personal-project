@@ -752,10 +752,14 @@ async def test_after_three_refusals_nothing_more_is_asked_this_turn(store):
         asked.append(description)
         return False
 
-    steps = [calls(("danger", {"target":p})) for p in "abcde"]
-    events = await run(make_agent(store, ScriptedLLM([*steps, "Stopped."])), confirm=no)
+    steps = [calls(("danger", {"target": p})) for p in "abc"]
+    llm = ScriptedLLM([*steps, "You declined those, so nothing was changed."])
+    events = await run(make_agent(store, llm), confirm=no)
     assert len(asked) == 3
-    assert sum(isinstance(e, ToolFinished) and not e.result.ok for e in events) == 5
+    assert sum(isinstance(e, ToolFinished) and not e.result.ok for e in events) == 3
+    # the turn is then wrapped up: one last call with no tools, told why
+    assert llm.calls[-1][1] is None and "declined actions" in llm.calls[-1][0][-1].content
+    assert done(events).text == "You declined those, so nothing was changed." and done(events).stopped == "max_steps"
     asked.clear()  # a new turn starts with a clean slate
     agent = make_agent(store, ScriptedLLM([calls(("danger", {"target":"a"})), "ok"]))
     await run(agent, confirm=no)

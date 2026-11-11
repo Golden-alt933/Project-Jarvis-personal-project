@@ -297,6 +297,39 @@ class UiaSession:
             result.append(element)
         return result, total
 
+    def window_text(self, hwnd: int, limit: int = 12000) -> str:
+        """The readable text of a window in reading order: its text nodes, the way a screen
+        reader would say them (for a browser, the page's own text). Buttons, fields and what
+        they hold are left out, and so is anything marked as a password."""
+        root = self._uia.ElementFromHandle(hwnd)
+        top = root.BuildUpdatedCache(self._cache_request)
+        lines: list[str] = []
+        size = total = 0
+        stack: list[tuple[Any, int]] = [(top, 0)]
+        while stack and total < MAX_NODES and size < limit:
+            node, depth = stack.pop()
+            total += 1
+            try:
+                role = _ROLE_NAMES.get(int(node.CachedControlType), "element")
+            except Exception:
+                continue
+            if depth < MAX_DEPTH:
+                try:
+                    kids = node.GetCachedChildren()
+                except Exception:
+                    kids = None
+                if kids:
+                    count = int(kids.Length)
+                    stack.extend((kids.GetElement(i), depth + 1) for i in range(count - 1, -1, -1))
+            if role != "text" or self._safe(node, "CachedIsPassword"):
+                continue
+            name = _WS.sub(" ", str(self._safe(node, "CachedName") or "")).strip()
+            if not name or (lines and lines[-1] == name):
+                continue
+            lines.append(name)
+            size += len(name) + 1
+        return "\n".join(lines)[:limit]
+
     def _runtime_key(self, node: Any, element: UiElement) -> Any:
         runtime = self._prop(node, "RuntimeId")
         if isinstance(runtime, tuple) and runtime:

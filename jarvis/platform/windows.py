@@ -499,6 +499,10 @@ class WindowsPlatform(BasePlatform):
         elements, total = session.run(session.snapshot, handle)
         return UiSnapshot(window=info, elements=elements, total=total)
 
+    def ui_window_text(self, handle: int) -> str:
+        session = self._uia()
+        return session.run(session.window_text, handle)
+
     def ui_read(self, handle: int, ref: int) -> UiElement:
         session = self._uia()
         return session.run(session.read, handle, ref)

@@ -47,7 +47,7 @@ CLEAN_CASES = [
     ("A → B", "A to B"),
     ("a -> b", "a to b"),
     ("| a | b |\n|---|---|\n| 1 | 2 |", "a, b. 1, 2."),
-    ("before\n```python\nprint(1)\n```\nafter", "before. (code omitted). after."),
+    ("before\n```python\nprint(1)\n```\nafter", "before. after."),
     ("~~gone~~ text", "gone text"),
     ("> quoted line", "quoted line"),
     ("Pi is 3.14 and v1.2.3", "Pi is 3.14 and v1.2.3"),
@@ -130,7 +130,7 @@ def test_no_split_inside_abbreviations_numbers_ellipses(text):
 def test_code_fence_never_split_or_spoken():
     out = chunks_whole("Here it is. Look:\n```\nfoo. bar. baz.\nqux\n```\nThat was the code, nice and short.")
     assert not any("foo" in c for c in out)
-    assert "(code omitted)" in out
+    assert "omitted" not in " ".join(out) and out[-1].startswith("That was the code")
 
 
 def test_open_fence_waits_for_close():
@@ -138,7 +138,7 @@ def test_open_fence_waits_for_close():
     assert c.feed("Intro text that is long enough to go.\n```py\nx = 1. y") == ["Intro text that is long enough to go."]
     assert c.feed("= 2\n") == []
     out = c.feed("```\nDone talking about it.\n") + c.flush()
-    assert out[0] == "(code omitted)"
+    assert out == ["Done talking about it."]
 
 
 def test_long_sentence_split_near_max_chars():
@@ -323,3 +323,20 @@ def test_initial_prompt_wraps_bare_name_only():
     assert stt.initial_prompt("jarvis") == "Hey Jarvis, can you help me?"
     assert stt.initial_prompt("Project names: Jarvis") == "Project names: Jarvis"
     assert stt.initial_prompt(None) is None and stt.initial_prompt("  ") is None
+
+
+def test_code_blocks_are_extracted_as_written():
+    from jarvis.voice.events import code_blocks
+
+    reply = (
+        "Here is the fix.\n```python\ndef two_sum(nums, target):\n    seen = {}\n"
+        "    for i, n in enumerate(nums):\n        if target - n in seen:\n"
+        "            return [seen[target - n], i]\n        seen[n] = i\n```\nAnd a shell line:\n"
+        "```\npytest -q\n```\nThat is all."
+    )
+    blocks = code_blocks(reply)
+    assert [b.language for b in blocks] == ["python", ""]
+    assert blocks[0].code.splitlines()[1] == "    seen = {}"  # indentation survives
+    assert blocks[0].code.endswith("        seen[n] = i") and blocks[1].code == "pytest -q"
+    assert code_blocks("no code here") == [] and code_blocks("```\n\n```") == []
+    assert code_blocks("cut off\n```js\nlet a = 1")[0].code == "let a = 1"  # unterminated block

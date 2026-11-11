@@ -68,8 +68,13 @@ class _AskOnce:
         self._ask = ask
         self._refused: set[str] = set()
 
+    @property
+    def exhausted(self) -> bool:
+        """True once the user has said no MAX_REFUSALS times this turn."""
+        return len(self._refused) >= MAX_REFUSALS
+
     async def __call__(self, description: str) -> bool:
-        if description in self._refused or len(self._refused) >= MAX_REFUSALS:
+        if description in self._refused or self.exhausted:
             return False
         approved = bool(await self._ask(description))
         if not approved:
@@ -381,6 +386,8 @@ class Agent:
             return "max_steps"
         if turn.blocked >= MAX_BLOCKED_CALLS:
             return "repeated_calls"  # the model is going round in circles: stop and report
+        if getattr(turn.ctx.confirm, "exhausted", False):
+            return "declined_actions"  # the user keeps saying no: stop trying other ways
         if time.monotonic() - turn.started > self.settings.turn_time_budget:
             return "time_budget"
         return None
@@ -409,7 +416,7 @@ class Agent:
             yield TextChunk(text)
         # Tool calls requested during wrap-up are dropped, so the transcript stays valid.
         self._persist(turn, Message("assistant", text))
-        yield self._finish(turn, text, "max_steps" if reason == "repeated_calls" else reason)
+        yield self._finish(turn, text, "max_steps" if reason in ("repeated_calls", "declined_actions") else reason)
 
     # -- model call with failure handling -----------------------------------
     async def _model_call(

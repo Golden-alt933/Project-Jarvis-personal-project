@@ -7,6 +7,7 @@ import math
 import random
 
 from jarvis.voice.events import (
+    CodeShown,
     ConfirmRequested,
     ConfirmResolved,
     EventCallback,
@@ -24,6 +25,15 @@ from jarvis.voice.events import (
 )
 
 LEVEL_HZ = 15.0
+DEMO_CODE = '''def fibonacci(n: int) -> int:
+    """Return the nth Fibonacci number."""
+    if n < 0:
+        raise ValueError("n must be non-negative")
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+'''
 
 
 class DemoSession:
@@ -96,6 +106,14 @@ class DemoSession:
         emit(TurnFinished("", 6.2, 3, 2, "nemotron-3-ultra", "done"))
         emit(StateChanged(VoiceState.IDLE))
         await self._sleep(2.0)
+        emit(Heard("jarvis, write a python function that returns the nth fibonacci number", True, 0.92))
+        emit(StateChanged(VoiceState.THINKING))
+        await self._sleep(1.0)
+        await self._speak(["Here is an iterative version that runs in linear time."], 0.7)
+        emit(CodeShown(DEMO_CODE, "python"))
+        emit(TurnFinished("", 2.4, 0, 0, "nemotron-3-ultra", "done"))
+        emit(StateChanged(VoiceState.IDLE))
+        await self._sleep(7.0)
         emit(Heard("remind me to call the bank", True, 0.9))
         emit(StateChanged(VoiceState.THINKING))
         emit(ToolActivity("send_email", False, summary="to=priya@example.com"))

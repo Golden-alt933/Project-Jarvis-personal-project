@@ -264,6 +264,8 @@ Everything heavy runs on free hosted services by default, so the laptop mostly c
 | Speech synthesis | Microsoft Edge neural voice `en-GB-RyanNeural` | hosted |
 | Voice-activity detection, screen OCR | Silero VAD, RapidOCR | local |
 
+The vision model's first call after a pause can take half a minute; a timeout or a busy answer gets one more hosted try before any local model is considered, and with `JARVIS_LOCAL_FALLBACK=false` no local vision model is loaded at all.
+
 When a hosted model does not answer, stalls part-way through a reply, or answers with nothing at all (all three happen on the free tier), Jarvis switches to the other hosted model within the same turn and keeps the failed one off the front of the queue for five minutes, so the following turns do not pay for it again. Only if both hosted models fail does it fall back to the local Ollama model, which is slower, offers fewer tools and loads about 2.5 GB onto the machine. Speech falls back per sentence to the local engines (Piper, faster-whisper). Set `JARVIS_LOCAL_FALLBACK=false` to never load a local model, or `jarvis --local` to use only local ones. An explicit `JARVIS_MODEL` is always respected: Jarvis then never switches to a different hosted model on its own.
 
 ## Voice mode
@@ -387,6 +389,21 @@ Consent: with `JARVIS_CAMERA=ask` (the default) the first use in each session as
 What was verified: a real built-in webcam on Windows 11 (capture, sharpest-frame selection, release, and a real hosted-model answer). Not verified: Linux cameras, external or virtual cameras, several cameras at once.
 <!-- camera-section:end -->
 
+## Help with code on your screen
+
+Ask "what's wrong with my solution?" while you are in a code editor or on an online judge such as NeetCode or LeetCode, then "fix it in the editor for me".
+
+| Step | Tool | What happens |
+|---|---|---|
+| Read your code | `copy_text` | Puts the cursor in the window's code editor if it is not there, copies its contents exactly (your clipboard is put back), and also returns the page's own text: the problem statement, examples and messages |
+| Find the defects | `review_code` | A separate, focused review call: only the task and the code, traced against every requirement and example. Nothing is run |
+| Show the fix | a fenced code block in the reply | In the terminal it prints as usual. In the HUD it appears in a code panel with line numbers and a Copy button. The voice never reads code out and no longer says "code omitted" |
+| Write it for you | `paste_text` | Pastes the complete code into the editor (typing it key by key would be re-indented and bracket-completed by the editor). With `replace_all` the editor's contents are read back and compared, so Jarvis says "confirmed" only when the editor really holds the new code. Ctrl+Z undoes it |
+
+Jarvis changes your editor only when you ask it to, and does not press Run or Submit unless asked. `paste_text` and `copy_text` work in any application, not only code editors: "write this paragraph into my document", "what does this file say". A window can be named by app ("Chrome") or by a word in its title ("NeetCode"). Password and card fields are refused, and a terminal asks first.
+
+What was verified: on Windows 11 with a real NeetCode problem page in Chrome, a solution with two planted defects was read from the editor, both defects were found, the corrected code was written back and confirmed by reading it back, and it passed the page's examples (3 of 3 runs after the review step was added; before it, the model fixed only one defect in 2 of 3 runs). Notepad was checked the same way. Not verified: other judges and editors, and Linux, where the cursor is not moved into the editor for you (click into it first) and the page's text is not returned.
+
 ## Desktop control
 
 <!-- desktop-section:start -->
@@ -394,6 +411,7 @@ Jarvis can act in desktop applications, not only see them. Order of preference: 
 
 - `desktop_inspect` lists a window's controls (buttons, fields, checkboxes, menu items, tabs, links, list items, readouts such as a calculator display) with stable ref numbers, role, name, value and state.
 - `desktop_click` clicks by ref (using the control's own action, such as Invoke or Toggle, and a real click at its centre only when no action exists) or, with `text=`, the on-screen text found by OCR. If several places match, it fails and lists them instead of guessing.
+- `paste_text` writes text or code into the focused editor exactly, and `copy_text` reads it back exactly (see the section above).
 - `desktop_type` types real Unicode keystrokes (any language, any keyboard layout); `press_keys` presses chords such as `ctrl+s` or `alt+tab` and rejects unknown key names with the list of valid ones; `desktop_scroll`, `focus_window` and `get_active_window` complete the set.
 - After each action the result says what changed: the foreground window before and after, the control's new value or state, and other controls that changed (for example the display after pressing equals), so the model checks instead of assuming.
 
@@ -420,7 +438,7 @@ jarvis --hud --no-voice # HUD, typed requests only
 jarvis --hud-demo       # scripted demo: no microphone, no model
 ```
 
-Compact (orb and state word) and expanded (conversation, tool ticker, confirmation card, system gauges, text input) modes; click the orb or press **Ctrl+Alt+J** (Windows) to toggle; **Esc** cancels the current turn. The tray icon offers Show/Hide, mute, new conversation and Quit. The orb is always in motion and changes colour with the state (cyan standing by and speaking, violet while thinking, amber when asking before a risky action). Measured on a laptop at 125% display scale: about 20% of one CPU core while active, about 8% standing by, nothing while hidden. On Windows the window is excluded from screen capture by default. On Linux the HUD needs the Qt xcb libraries (the installer lists them); see the platform notes above.
+Compact (orb and state word) and expanded (conversation, code panel, tool ticker, confirmation card, system gauges, text input) modes; click the orb or press **Ctrl+Alt+J** (Windows) to toggle; **Esc** cancels the current turn. The tray icon offers Show/Hide, mute, new conversation and Quit. The orb is always in motion and changes colour with the state (cyan standing by and speaking, violet while thinking, amber when asking before a risky action). Measured on a laptop at 125% display scale: about 20% of one CPU core while active, about 8% standing by, nothing while hidden. On Windows the window is excluded from screen capture by default. On Linux the HUD needs the Qt xcb libraries (the installer lists them); see the platform notes above.
 
 ## Privacy
 

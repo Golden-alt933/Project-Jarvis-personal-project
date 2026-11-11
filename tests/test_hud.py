@@ -16,16 +16,18 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtCore import QRect  # noqa: E402
+from PyQt6.QtCore import QRect, Qt  # noqa: E402
 from PyQt6.QtGui import QImage, QPainter  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from jarvis.hud.codepanel import MAX_HEIGHT  # noqa: E402
 from jarvis.hud.demo import DemoSession  # noqa: E402
 from jarvis.hud.orb import OrbWidget  # noqa: E402
 from jarvis.hud.sysmon import Sample, take_sample  # noqa: E402
 from jarvis.hud.window import COMPACT, HudWindow, clamp_rect  # noqa: E402
 from jarvis.interfaces import cli  # noqa: E402
 from jarvis.voice.events import (  # noqa: E402
+    CodeShown,
     ConfirmRequested,
     ConfirmResolved,
     Heard,
@@ -798,3 +800,112 @@ def test_run_hud_uses_the_voice_model_before_building_the_session(tmp_path: Path
     assert order == ["use_voice_model", "make_session", "run"]
     assert windows[0].footer.text == "fast-model"
     assert "type below" in windows[0].reply.hint_text.lower() and "Say" not in windows[0].reply.hint_text
+
+
+# -- code panel ----------------------------------------------------------------------
+CODE_A = "def f(x):\n    if x:\n        return 1\n\n    return 2"
+CODE_B = "echo hi\n\tindented with tab"
+
+
+def test_code_shown_routes_to_panel_and_keeps_all_blocks(hud) -> None:
+    w, _ = hud
+    h = w.controller.handle
+    h(UserText("write code"))
+    h(CodeShown(CODE_A, "python"))
+    h(CodeShown(CODE_B, ""))
+    assert [b.code for b in w.code.blocks] == [CODE_A, CODE_B]
+    assert [b.language for b in w.code.blocks] == ["python", ""]
+    assert w.code.isVisible() and w.code.blocks[1].title == "CODE"
+    assert len(w.code.blocks[0].lines) == 5  # blank line and indentation survive
+    assert w.code.blocks[0].lines[2] == "        return 1" and w.code.blocks[0].lines[3] == ""
+
+
+def test_code_panel_paints_and_scrolls(hud) -> None:
+    w, _ = hud
+    w.controller.handle(CodeShown("\n".join(f"line {i}" + "x" * 90 for i in range(200)), "python"))
+    img = QImage(w.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    w.render(img)  # paints without raising
+    assert w.code._max_scroll_y() > 0 and w.code._max_scroll_x() > 0
+    w.code.scroll_y = 1e9
+    w.code._clamp()
+    assert w.code.scroll_y == w.code._max_scroll_y()
+
+
+def test_code_copy_puts_exact_text_on_clipboard(hud) -> None:
+    w, _ = hud
+    h = w.controller.handle
+    h(CodeShown(CODE_A, "python"))
+    h(CodeShown(CODE_B, ""))
+    w.code.copy_block(1)
+    assert QApplication.clipboard().text() == CODE_B and w.code.copied == 1
+    w.code.copy_block(0)
+    assert QApplication.clipboard().text() == CODE_A
+    w.code._clear_copied()
+    assert w.code.copied is None
+
+
+def test_code_copy_button_click(hud) -> None:
+    w, _ = hud
+    w.controller.handle(CodeShown(CODE_A, "python"))
+    pos = w.code._copy_rect(w.code._block_tops()[0], 0).center()
+    QApplication.clipboard().setText("")
+    assert w.code._hit(pos) == ("copy", 0)
+    w.code.copy_block(0)
+    assert QApplication.clipboard().text() == CODE_A
+    assert w.code._hit(w.code._close_rect().center()) == ("close", 0)
+    w.code.dismiss()
+    assert not w.code.blocks and not w.code.isVisible()
+
+
+def test_new_exchange_clears_code(hud) -> None:
+    w, _ = hud
+    h = w.controller.handle
+    h(UserText("q"))
+    h(Spoke("Here you go."))
+    h(CodeShown(CODE_A, "python"))
+    h(TurnFinished("", 1.0, 0, 0, "m", "done"))
+    assert w.code.blocks  # still there after the turn ends
+    h(Heard("next", True, 0.9))
+    assert not w.code.blocks and not w.code.isVisible()
+
+
+def test_code_without_spoken_text_does_not_get_cleared_by_turn_finish(hud) -> None:
+    w, _ = hud
+    h = w.controller.handle
+    h(CodeShown(CODE_A, "python"))
+    h(TurnFinished("Some text.", 1.0, 0, 0, "m", "done"))
+    assert [b.code for b in w.code.blocks] == [CODE_A]
+
+
+def test_code_panel_never_takes_focus(hud) -> None:
+    w, _ = hud
+    w.controller.handle(CodeShown(CODE_A, "python"))
+    assert w.code.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert w.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    flags = w.windowFlags()
+    assert flags & Qt.WindowType.Tool and flags & Qt.WindowType.WindowStaysOnTopHint
+    assert not w.isActiveWindow() and not w.code.hasFocus()
+    assert w.code.window() is w  # same top-level: capture exclusion and stay-on-top are the window's
+
+
+def test_code_expands_compact_window(tmp_path: Path) -> None:
+    w = HudWindow(tmp_path, native=False, auto_tick=False, sysmon=False)
+    w.show()
+    w.set_mode("compact", animate=False)
+    w.controller.handle(CodeShown(CODE_A, "python"))
+    w.set_mode("expanded", animate=False)  # settle the mode animation
+    assert w.mode == "expanded" and w.code.isVisible() and w.code.blocks
+    w.close()
+
+
+def test_long_code_is_height_capped(hud) -> None:
+    w, _ = hud
+    size = w.size()
+    w.controller.handle(CodeShown("\n".join(f"x = {i}" for i in range(3000)), "python"))
+    assert w.size() == size
+    assert 0 < w.code.height() <= MAX_HEIGHT
+    assert w.code.geometry().top() >= 0 and w.code.geometry().bottom() < w.input.geometry().top()
+    short = w.code.height()
+    w.controller.handle(UserText("again"))
+    w.controller.handle(CodeShown("a = 1", "python"))
+    assert w.code.height() < short

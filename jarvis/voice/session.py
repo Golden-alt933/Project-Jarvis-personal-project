@@ -75,6 +75,7 @@ from jarvis.voice.events import (  # noqa: E402,F401
     Info,
     Levels,
     MicMuted,
+    CodeShown,
     Spoke,
     StateChanged,
     ToolActivity,
@@ -82,6 +83,7 @@ from jarvis.voice.events import (  # noqa: E402,F401
     UserText,
     VoiceEvent,
     VoiceState,
+    code_blocks,
 )
 SourceFactory = Callable[[], AsyncIterator[SpeechStarted | Utterance]]
 
@@ -552,6 +554,9 @@ class VoiceSession:
                     self._enqueue(turn, [event.text])
                 elif isinstance(event, TurnDone):
                     finished = True
+                    if event.stopped != "cancelled":
+                        for block in code_blocks(event.text):
+                            self._emit(block)
                     self._emit(TurnFinished(
                         event.text, event.seconds, event.steps, event.tool_calls, event.model, event.stopped,
                     ))

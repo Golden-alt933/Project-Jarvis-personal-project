@@ -47,6 +47,10 @@ class VisionError(RuntimeError):
     """A vision call failed; the message says what to do about it."""
 
 
+class VisionBusy(VisionError):
+    """The hosted model timed out or was busy: the same call is worth one more try."""
+
+
 @dataclass(frozen=True)
 class VisionAnswer:
     text: str
@@ -69,9 +73,11 @@ class VisionClient:
         ollama_base_url: str = "http://localhost:11434",
         ollama_model: str = "",
         http: httpx.AsyncClient | None = None,
+        allow_local: bool = True,
     ) -> None:
         self.provider = provider
         self.mode = mode
+        self.allow_local = allow_local  # False: never load a local model as a fallback
         self.cloud_base_url = cloud_base_url.rstrip("/")
         self.cloud_api_key = cloud_api_key
         self.cloud_model = cloud_model
@@ -88,9 +94,9 @@ class VisionClient:
         """Paths to try, in order. Local-only mode never lists the hosted path."""
         if self.mode == "local":
             return ["local"]
-        if self.mode == "cloud":
-            return ["cloud", "local"]
-        return ["cloud", "local"] if self.cloud_available else ["local"]
+        if self.mode != "cloud" and not self.cloud_available:
+            return ["local"]
+        return ["cloud", "local"] if self.allow_local else ["cloud"]
 
     def primary_path(self) -> str:
         return self.order()[0]
@@ -104,7 +110,13 @@ class VisionClient:
         for path in self.order():
             try:
                 if path == "cloud":
-                    return await self._ask_cloud(image, question)
+                    try:
+                        return await self._ask_cloud(image, question)
+                    except VisionBusy as exc:
+                        # The hosted model's first call after a pause can time out and the next
+                        # answers in seconds: try again before loading a model onto this machine.
+                        log.warning("vision cloud path was busy (%s); trying it once more", exc)
+                        return await self._ask_cloud(image, question)
                 return await self._ask_local(image, question)
             except VisionError as exc:
                 log.warning("vision %s path failed: %s", path, exc)
@@ -199,14 +211,15 @@ class VisionClient:
                 async with httpx.AsyncClient(trust_env=False) as http:
                     response = await http.post(url, json=payload, headers=headers, timeout=timeout)
         except httpx.TimeoutException as exc:
-            raise VisionError(f"{model} timed out after {timeout:.0f}s") from exc
+            raise VisionBusy(f"{model} timed out after {timeout:.0f}s") from exc
         except httpx.HTTPError as exc:
             raise VisionError(f"{model} unreachable ({type(exc).__name__}){'; ' + hint if hint else ''}") from exc
         if response.status_code != 200:
             reason = {404: "not available", 429: "rate limited", 400: "rejected the request (no image support?)"}.get(
                 response.status_code, f"HTTP {response.status_code}"
             )
-            raise VisionError(f"{model} {reason} (HTTP {response.status_code}){'; ' + hint if hint and response.status_code == 404 else ''}")
+            kind = VisionBusy if response.status_code in (429, 500, 502, 503, 504) else VisionError
+            raise kind(f"{model} {reason} (HTTP {response.status_code}){'; ' + hint if hint and response.status_code == 404 else ''}")
         try:
             return response.json()
         except ValueError as exc:
@@ -230,4 +243,5 @@ def build_vision_client(settings: "Settings", http: httpx.AsyncClient | None = N
         ollama_base_url=settings.ollama_base_url,
         ollama_model=settings.ollama_vision_model,
         http=http,
+        allow_local=bool(getattr(settings, "local_fallback", True)),
     )

@@ -213,6 +213,8 @@ Failure handling:
   OpenAI-compatible client raises `LLMUnavailable` itself when a stream stalls between chunks
   or produces only reasoning for three times the first-byte timeout.
 - With no other client left, an empty reply is nudged once, then answered with an apology.
+- Three refusals in one turn end it the same way a repeated call does: one last model call
+  with no tools, to report (`declined_actions`).
 - A confirmation the user refused is not asked again in the same turn (`_AskOnce`), and after
   three refusals nothing more is asked that turn.
 - Optional tool arguments filled with "none", "null" or JSON null are dropped before
@@ -269,3 +271,20 @@ sentence. The model turns "every morning at nine, brief me" into a `schedule_tas
   shows. Multi-step website work uses the
   browser tools, steered by the "working on websites" prompt section, which is added only when the
   browser tool group is offered to the model (`build_system_prompt(tool_groups=...)`).
+
+## Code on screen
+
+- **Showing code.** A reply's fenced blocks become `CodeShown(code, language)` events
+  (`voice/events.py: code_blocks`), emitted by both sessions when the turn's text is complete,
+  before `TurnFinished`. `clean_for_speech` drops the blocks, so they are never spoken. The HUD
+  routes them to `hud/codepanel.py: CodePanel` (a child widget of the HUD window: no focus, same
+  capture exclusion, no timer); the terminal voice display prints them.
+- **Reading and writing an editor.** `tools/builtin/desktop.py: copy_text, paste_text` go through
+  the clipboard (saved and put back) with Ctrl+A / Ctrl+C / Ctrl+V. `_cursor_into_editor` gives the
+  window's code editor keyboard focus through UI Automation when the cursor is elsewhere (this is
+  what makes a web editor such as Monaco work: its hidden input cannot be clicked from the
+  extension). `paste_text(replace_all=True)` reads the editor back and compares, so its result is
+  a fact, not a hope. `copy_text` adds `Platform.ui_window_text` (the window's text nodes in
+  reading order), which is where the problem statement comes from.
+- **Reviewing.** `tools/builtin/coding.py: review_code` is one model call with only the task and
+  the code and a reviewer prompt. The agent model orchestrates; the review call does the thinking.

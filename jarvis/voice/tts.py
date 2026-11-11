@@ -81,7 +81,7 @@ def _clean_line(line: str) -> str:
 
 def clean_for_speech(text: str) -> str:
     """Make model output speakable: no Markdown, code, URLs or symbols TTS mangles."""
-    text = _FENCE_RE.sub("\n(code omitted)\n", text)
+    text = _FENCE_RE.sub("\n", text)  # code is shown on screen (CodeShown), never read out
     text = _IMAGE_RE.sub(r"\1", text)
     text = _LINK_RE.sub(r"\1", text)
     text = _URL_RE.sub(_domain, text)

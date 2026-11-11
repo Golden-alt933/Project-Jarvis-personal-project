@@ -20,6 +20,7 @@ from jarvis.voice.events import (
     EventCallback,
     Info,
     MicMuted,
+    CodeShown,
     Spoke,
     StateChanged,
     ToolActivity,
@@ -27,6 +28,7 @@ from jarvis.voice.events import (
     UserText,
     VoiceEvent,
     VoiceState,
+    code_blocks,
 )
 from jarvis.voice.summary import summarize_args
 
@@ -192,6 +194,9 @@ class TextSession:
             if not turn.got_text and event.stopped != "cancelled":
                 self._speak(turn, turn.splitter.feed(event.text))  # e.g. an error apology
             self._speak(turn, turn.splitter.flush())
+            if event.stopped != "cancelled":
+                for block in code_blocks(event.text):
+                    self._emit(block)
             self._emit(TurnFinished(
                 event.text, event.seconds, event.steps, event.tool_calls, event.model, event.stopped,
             ))

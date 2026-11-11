@@ -8,6 +8,7 @@ through one callback, `on_event(event)`; a frontend never reaches into the sessi
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass
 from typing import Callable, Protocol, runtime_checkable
 
@@ -46,6 +47,27 @@ class Spoke:
     text-only session). Concatenate with spaces for the full reply."""
 
     text: str
+
+
+@dataclass
+class CodeShown:
+    """A block of code from the reply. It is shown on screen as written and is never spoken;
+    sent once per block when the turn's text is complete, before TurnFinished."""
+
+    code: str
+    language: str = ""
+
+
+_CODE_BLOCK = re.compile(r"```[ \t]*([A-Za-z0-9_+#.-]*)[^\n]*\n(.*?)(?:\n[ \t]*```|\Z)", re.DOTALL)
+
+
+def code_blocks(text: str) -> list[CodeShown]:
+    """The fenced code blocks of a reply, in order, with indentation kept."""
+    return [
+        CodeShown(m.group(2).rstrip(), m.group(1).lower())
+        for m in _CODE_BLOCK.finditer(text or "")
+        if m.group(2).strip()
+    ]
 
 
 @dataclass
@@ -102,6 +124,7 @@ VoiceEvent = (
     | Heard
     | UserText
     | Spoke
+    | CodeShown
     | ToolActivity
     | Levels
     | Info

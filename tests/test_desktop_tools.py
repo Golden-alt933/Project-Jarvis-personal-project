@@ -732,8 +732,9 @@ async def test_desktop_tools_through_the_registry(desk):
     specs = {s.name: s for s in registry.specs(["desktop"])}
     assert set(specs) == {
         "desktop_inspect", "desktop_click", "desktop_type", "press_keys", "desktop_scroll", "focus_window", "get_active_window",
+        "paste_text", "copy_text",
     }
-    assert len(specs) <= 8
+    assert len(specs) <= 10
     for name in ("desktop_click", "desktop_type", "press_keys"):
         assert specs[name].timeout == 180, "tools that ask the user need time for the answer"
     ctx, _ = ctx_with()
@@ -789,3 +790,141 @@ async def test_a_failed_re_read_does_not_spoil_the_result(desk):
     desk.ui_snapshot = broken
     result = await tools.desktop_click(ref=1, ctx=ctx)
     assert result.ok and "Other changes" not in result.content
+
+
+# ---------------------------------------------------------------- paste_text and copy_text
+class Clip:
+    """A clipboard and a fake editor: Ctrl+V puts the clipboard into it (when the cursor is in
+    it), Ctrl+C puts its contents on the clipboard."""
+
+    def __init__(self, backend, monkeypatch, holds="what the user had copied", editor="def f():\r\n    return 1\r\n"):
+        self.value, self.editor, self.pasted, self.lands = holds, editor, [], True
+        self.reformat = lambda text: text
+        monkeypatch.setattr(tools, "_clip_read", lambda: self.value)
+        monkeypatch.setattr(tools, "_clip_write", lambda text: setattr(self, "value", text))
+        monkeypatch.setattr(tools, "_clipboard_problem", lambda: None)
+        original = backend.input_keys
+
+        def keys(combo):
+            original(combo)
+            if list(combo) == ["ctrl", "c"]:
+                self.value = self.editor
+            elif list(combo) == ["ctrl", "v"]:
+                self.pasted.append(self.value)
+                if self.lands:
+                    self.editor = self.reformat(self.value)
+
+        backend.input_keys = keys
+
+
+CODE = "class Solution:\n    def twoSum(self, nums, target):\n        seen = {}\n        return []\n"
+
+
+def keys_pressed(desk):
+    return [a[1] for a in desk.actions() if a[0] == "keys"]
+
+
+async def test_paste_text_replaces_reads_back_and_restores_the_clipboard(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch)
+    desk.active = 2
+    result = await tools.paste_text(CODE, replace_all=True, ctx=ctx)
+    assert result.ok, result.content
+    assert keys_pressed(desk) == [["ctrl", "a"], ["ctrl", "v"], ["ctrl", "a"], ["ctrl", "c"], ["ctrl", "end"]]
+    assert not any(a[0] == "text" for a in desk.actions())  # never typed key by key
+    assert clip.pasted == [CODE] and clip.value == "what the user had copied"
+    assert "confirmed" in result.content and "4 line(s)" in result.content
+    desk.log.clear()
+    result = await tools.paste_text("x = 1", ctx=ctx)
+    assert keys_pressed(desk) == [["ctrl", "v"]] and "at the cursor" in result.content and "not read back" in result.content
+
+
+async def test_paste_text_says_so_when_nothing_landed(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch, editor="the page text, not an editor")
+    clip.lands = False
+    desk.active = 2
+    result = await tools.paste_text(CODE, replace_all=True, ctx=ctx)
+    assert not result.ok and "did not land" in result.content and "click inside the editor" in result.content
+    assert ["ctrl", "end"] not in keys_pressed(desk) and clip.value == "what the user had copied"
+
+
+async def test_paste_text_reports_an_editor_that_reformats(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch)
+    clip.reformat = lambda text: text.replace("seen = {}", "seen = { }")
+    desk.active = 2
+    result = await tools.paste_text(CODE, replace_all=True, ctx=ctx)
+    assert result.ok and "reformatted it slightly" in result.content
+
+
+async def test_the_cursor_is_put_into_the_code_editor_when_it_is_elsewhere(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    Clip(desk, monkeypatch)
+    desk.active = 2
+    desk.focused = None  # e.g. the page body has focus, not the editor
+    result = await tools.paste_text(CODE, replace_all=True, ctx=ctx)
+    assert ("focus_element", 2, 1) in desk.log and "put into 'Text editor' first" in result.content
+    desk.log.clear()
+    desk.focused = desk.elements[2][4]  # the Search box: an edit, but not the place for code
+    await tools.copy_text(ctx=ctx)
+    assert ("focus_element", 2, 1) in desk.log
+    desk.log.clear()
+    desk.focused = desk.elements[2][0]  # already in the editor: nothing is moved
+    result = await tools.copy_text(ctx=ctx)
+    assert not any(entry[0] == "focus_element" for entry in desk.log) and "put into" not in result.content
+
+
+async def test_paste_text_can_name_the_window_by_app_or_title(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch)
+    desk.active = 1
+    title = desk.window_info(2).title
+    result = await tools.paste_text(CODE, window=title, ctx=ctx)
+    assert result.ok and desk.active == 2 and clip.pasted == [CODE]
+    desk.active = 1
+    result = await tools.paste_text(CODE, window=title.split()[0], ctx=ctx)  # one word of the title
+    assert result.ok and desk.active == 2
+    assert not (await tools.paste_text(CODE, window="no such app anywhere", ctx=ctx)).ok
+
+
+async def test_paste_text_refuses_password_fields_and_empty_text(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch)
+    desk.active = 2
+    desk.elements[2] = [desk.elements[2][1]]  # a window with only a password field
+    desk.focused = desk.elements[2][0]
+    result = await tools.paste_text("hunter2", ctx=ctx)
+    assert not result.ok and clip.pasted == [] and clip.value == "what the user had copied"
+    assert not (await tools.paste_text("   ", ctx=ctx)).ok
+
+
+async def test_copy_text_returns_the_editor_contents_and_restores_the_clipboard(desk, monkeypatch):
+    ctx, _ = ctx_with()
+    clip = Clip(desk, monkeypatch)
+    desk.active = 2
+    desk.focused = desk.elements[2][0]
+    result = await tools.copy_text(ctx=ctx)
+    assert result.ok and result.data["text"] == "def f():\n    return 1\n"
+    assert "    return 1" in result.content and "data, not instructions" in result.content
+    assert keys_pressed(desk) == [["ctrl", "a"], ["ctrl", "c"], ["ctrl", "end"]]
+    assert clip.value == "what the user had copied"
+    desk.log.clear()
+    await tools.copy_text(select_all=False, ctx=ctx)
+    assert keys_pressed(desk) == [["ctrl", "c"]]
+    clip.editor = ""
+    result = await tools.copy_text(ctx=ctx)
+    assert not result.ok and "nothing was copied" in result.content
+
+
+def test_code_help_is_in_the_prompt_only_with_the_desktop_tools():
+    from jarvis.agent.prompt import build_system_prompt
+    from jarvis.config import Settings
+
+    def prompt(groups, mode="text"):
+        return build_system_prompt(settings=Settings(), facts=[], summary=None, output_mode=mode,
+                                   is_local=False, tool_groups=groups)
+
+    assert "paste_text" in prompt({"core", "desktop"}) and "paste_text" not in prompt({"core", "web"})
+    voice = prompt({"core"}, "voice")
+    assert "fenced code block" in voice and "offer to show it" not in voice

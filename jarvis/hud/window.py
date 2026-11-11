@@ -14,6 +14,7 @@ from PyQt6.QtGui import QAction, QBrush, QColor, QFontMetricsF, QGuiApplication,
 from PyQt6.QtWidgets import QApplication, QGraphicsOpacityEffect, QMenu, QSystemTrayIcon, QWidget
 
 from jarvis.hud import winfx
+from jarvis.hud.codepanel import CodePanel
 from jarvis.hud.controller import STATE_WORDS, HudController
 from jarvis.hud.orb import OrbWidget
 from jarvis.hud.sysmon import Sample, SysMonitor
@@ -188,6 +189,8 @@ class HudWindow(QWidget):
         self.input = PillInput(self.body)
         self.footer = FooterLabel(self.body)
         self.confirm = ConfirmCard(self.body)
+        self.code = CodePanel(self.body)
+        self.code.closed.connect(self._layout)
         self.controller = HudController(self)
         self._animated = [self.state_label, self.header, self.reply, self.ticker, self.input, self.confirm,
                           *self.gauges.values()]
@@ -348,6 +351,12 @@ class HudWindow(QWidget):
         reply_top = MARGIN + 332
         self.reply.setGeometry(x0, reply_top, cw, max(40, self.ticker.y() - 8 - reply_top))
         self.confirm.setGeometry(MARGIN + 12, gauge_y - 70, PANEL.width() - 24, self.input.y() - gauge_y + 70 - 6)
+        # code panel: overlays the reply area, grows upward from just above the input, capped by the room
+        code_bottom = self.input.y() - 4
+        code_room = code_bottom - (MARGIN + 328)
+        code_h = self.code.wanted_height(code_room)
+        self.code.setGeometry(MARGIN + 12, code_bottom - code_h, PANEL.width() - 24, code_h)
+        self.code.raise_()
         self.confirm.raise_()
 
     def resizeEvent(self, e) -> None:  # noqa: N802
@@ -394,6 +403,7 @@ class HudWindow(QWidget):
         if self.mode_t > 0.0 and self.body.isVisible():
             for wdg in (self.header, self.ticker, self.input, *self.gauges.values()):
                 wdg.accent = accent
+            self.code.set_accent(accent)
             for wdg in self._animated:
                 wdg.advance(dt)
             want = self.ticker.wanted_height()
@@ -579,6 +589,14 @@ class HudWindow(QWidget):
             self._capsule_w = min(COMPACT.width() - 10.0, max(fm.horizontalAdvance(w) for w in CAPSULE_WORDS) + 30.0)
         return self._capsule_w
 
+    def show_code(self, code: str, language: str = "") -> None:
+        """Add a code block to the code panel, opening the panel (and expanding from compact).
+        Never raises or activates the window: this must not steal focus from the user's editor."""
+        self.code.add_block(code, language)
+        if self.mode != "expanded":
+            self.set_mode("expanded")
+        self._layout()
+
     def set_audio(self, has_audio: bool, wake_word: str = "Jarvis") -> None:
         """Tell the window whether the session has a microphone (hides the mic button, picks the hint)."""
         self.header.mic.setVisible(has_audio)
@@ -647,3 +665,5 @@ class HudWindow(QWidget):
         self.hooks.new_conversation()
         self.reply.clear()
         self.ticker.clear()
+        self.code.clear()
+        self._layout()
