@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      JARVIS_OLLAMA_AUTOSTART: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libportaudio2 libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 \
+            xvfb shellcheck nodejs
+
+      - name: Install dependencies (all extras except gpu)
+        run: uv sync --extra all
+
+      - name: Tests
+        run: uv run pytest -q -ra
+
+      - name: shellcheck install.sh
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh
+
+  installer:
+    name: installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      JARVIS_NO_SETUP: "1"
+      JARVIS_OLLAMA_AUTOSTART: "false"
+      # not a secret: a placeholder so the configuration check has a key to find; --offline
+      # means it is never sent anywhere
+      NVIDIA_API_KEY: ci-placeholder-not-a-real-key
+    steps:
+      - uses: actions/checkout@v4
+
+      # The repository is private, so git (which uv uses for git dependencies) needs the
+      # job's own read-only token to fetch it. Nothing is stored beyond this runner.
+      - name: Let git read this repository
+        shell: bash
+        run: git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install Jarvis with install.sh
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb
+          bash install.sh --system-deps --ref "$GITHUB_SHA"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Jarvis with install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./install.ps1 --ref $env:GITHUB_SHA
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.local\bin"
+
+      - name: Installed command works
+        shell: bash
+        run: |
+          jarvis --version
+          jarvis --config-path
+          jarvis --doctor --offline
+
+      - name: HUD demo under a virtual display
+        if: runner.os == 'Linux'
+        run: |
+          if ! jarvis --help | grep -q -- --hud-demo; then
+            echo "no HUD in this build; skipping"
+            exit 0
+          fi
+          set +e
+          xvfb-run -a timeout 8 jarvis --hud-demo
+          code=$?
+          echo "hud-demo exit code: $code"
+          # 124 = still running when the timeout ended it, which is what a healthy demo does
+          [ "$code" -eq 0 ] || [ "$code" -eq 124 ]
+
+      - name: Run the installer again (idempotent upgrade)
+        if: runner.os == 'Linux'
+        run: |
+          bash install.sh --ref "$GITHUB_SHA"
+          jarvis --version
