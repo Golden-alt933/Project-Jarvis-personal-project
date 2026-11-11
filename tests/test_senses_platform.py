@@ -344,6 +344,16 @@ def test_doctor_runs_both_checks_in_the_full_list(monkeypatch, tmp_path, fake_pl
     assert "Camera" in names and "Desktop control" in names
 
 
+def test_small_local_models_do_not_get_the_camera_or_desktop_tools():
+    groups = Settings(_env_file=None).local_tool_groups
+    assert "camera" not in groups and "desktop" not in groups
+
+
+def test_camera_settings_defaults():
+    s = Settings(_env_file=None)
+    assert s.camera == "ask" and s.camera_index == ""
+
+
 def test_the_desktop_extra_is_only_checked_where_it_applies(monkeypatch, tmp_path, fake_platform):
     monkeypatch.setattr(doctor, "EXTRAS", {"office": ("openpyxl",), "desktop": ()})
     checks = doctor.check_extras()

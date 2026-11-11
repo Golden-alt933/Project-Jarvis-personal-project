@@ -49,12 +49,63 @@ MAX_REPEAT = 50
 
 
 class _State:
-    """The window whose refs the model is using: the one most recently inspected."""
+    """The window whose refs the model is using (the one most recently inspected), and what
+    each inspected window showed last, so actions can report what else changed."""
 
     target: int | None = None
+    seen: dict[int, dict[int, tuple[str, str, str, bool]]] = {}
 
 
 _state = _State()
+MAX_CHANGE_LINES = 5
+
+
+def _remember(handle: int, elements: list[UiElement]) -> None:
+    _state.seen[handle] = {e.ref: (e.name, e.value, e.state, e.enabled) for e in elements}
+
+
+async def _other_changes(handle: int, skip_ref: int | None = None) -> str:
+    """Re-read the window and say what changed besides ``skip_ref`` since it was last read.
+    This is what makes a click verifiable when the effect shows up elsewhere (a calculator's
+    display, a status line). Empty when nothing changed or the window cannot be listed."""
+    backend = _backend()
+    before = _state.seen.get(handle)
+    if before is None or not backend.can_inspect_elements():
+        return ""
+    try:
+        snap = await asyncio.to_thread(backend.ui_snapshot, handle)
+    except Exception:  # verification is best effort; the action itself already happened
+        log.debug("could not re-read window %s", handle, exc_info=True)
+        return ""
+    _remember(handle, snap.elements)
+    lines: list[str] = []
+    for e in snap.elements:
+        old = before.get(e.ref)
+        if e.ref == skip_ref or old is None or old == (e.name, e.value, e.state, e.enabled):
+            continue
+        if old[0] != e.name:
+            lines.append(f"[{e.ref}] {e.role} '{old[0]}' -> '{e.name}'")
+        elif old[1] != e.value:
+            lines.append(f"[{e.ref}] {e.role} '{e.name}' value '{old[1]}' -> '{e.value}'")
+        elif old[2] != e.state:
+            lines.append(f"[{e.ref}] {e.role} '{e.name}' state '{old[2] or '-'}' -> '{e.state or '-'}'")
+        else:
+            lines.append(f"[{e.ref}] {e.role} '{e.name}' is now {'enabled' if e.enabled else 'disabled'}")
+    now = {e.ref for e in snap.elements}
+    appeared = len(now - set(before))
+    vanished = len(set(before) - now)
+    if not (lines or appeared or vanished):
+        return ""
+    text = "Other changes in the window: " + "; ".join(lines[:MAX_CHANGE_LINES])
+    extra = len(lines) - MAX_CHANGE_LINES
+    notes = (
+        ([f"{extra} more changed"] if extra > 0 else [])
+        + ([f"{appeared} new control(s)"] if appeared else [])
+        + ([f"{vanished} gone"] if vanished else [])
+    )
+    if notes:
+        text += ("; " if lines else "") + ", ".join(notes) + " (inspect again to see them)"
+    return text + "."
 
 
 # ---------------------------------------------------------------- shared steps
@@ -261,6 +312,7 @@ async def desktop_inspect(window: str | None = None, filter: str | None = None, 
     except OSError as exc:
         return ToolResult.fail(f"could not read the window: {exc}")
     _state.target = info.handle
+    _remember(info.handle, snap.elements)
     wanted = (filter or "").strip()
     elements = [e for e in snap.elements if not wanted or _matches(e, wanted)]
     limit = max(1, min(int(max_items), 200))
@@ -331,6 +383,8 @@ async def _click_ref(ctx: ToolContext, ref: int, double: bool) -> ToolResult:
         f"Clicked [{ref}] {_element_text(element)} (via {method}).\n"
         f"{_title_change(before, after_title)}\n{_element_change(element, after)}"
     )
+    if changes := await _other_changes(info.handle, skip_ref=ref):
+        text += "\n" + changes
     return ToolResult.success(text, data={"method": method, "ref": ref})
 
 
@@ -341,13 +395,18 @@ async def _click_text(ctx: ToolContext, text: str, double: bool) -> ToolResult:
         return blocked
     assert info is not None
     try:
-        grab = await asyncio.to_thread(grab_for_ocr, info.rect)
-        lines = await asyncio.to_thread(ocr_image, grab.image)
+        # Search the window first (OCR of a window is several times faster than of the whole
+        # monitor); only if that finds nothing look at the whole monitor.
+        for crop in (True, False):
+            grab = await asyncio.to_thread(grab_for_ocr, info.rect, crop)
+            lines = await asyncio.to_thread(ocr_image, grab.image)
+            candidates = match_text(lines, text)
+            if candidates or info.rect is None:
+                break
     except CaptureError as exc:
         return ToolResult.fail(str(exc))
     except ImportError as exc:
         return ToolResult.fail(f"OCR is not installed ({exc.name})", "Install rapidocr-onnxruntime (the 'screen' extra).")
-    candidates = match_text(lines, text)
     if not candidates:
         sample = ", ".join(f"'{ln.text.strip()[:30]}'" for ln in lines[:12])
         return ToolResult.fail(
@@ -390,7 +449,7 @@ async def desktop_click(
     """Click a control in a desktop application. Give a ref from desktop_inspect (reliable: it
     uses the control's own action, or clicks its centre), or text= to click the on-screen text
     found by OCR (for apps whose controls desktop_inspect cannot see). Exactly one of the two.
-    Buying, paying, sending, posting, deleting, signing in and accepting terms ask the user
+    A ref acts in the window most recently inspected (there is no window argument). Buying, paying, sending, posting, deleting, signing in and accepting terms ask the user
     first. The result says what changed: the foreground window and the control's new state.
 
     Args:
@@ -416,8 +475,8 @@ async def desktop_type(
     text: str, ref: int | None = None, clear: bool = False, submit: bool = False, ctx: ToolContext = None  # type: ignore[assignment]
 ) -> ToolResult:
     """Type text into a desktop application, as real keystrokes (any language or symbol). With
-    ref (from desktop_inspect) the field is focused first; without it the text goes to whatever
-    has focus. Password, credential and payment-card fields are refused: the user types those.
+    ref (from the latest desktop_inspect; there is no window argument) the field is focused
+    first; without it the text goes to whatever has focus. Password, credential and payment-card fields are refused: the user types those.
     Typing into a terminal or the Run dialog asks the user first, because it runs commands.
 
     Args:
@@ -491,8 +550,12 @@ async def desktop_type(
             lines.append(f"Element [{ref}] now holds '{after.value[:200]}'.")
         else:
             lines.append(f"Element [{ref}] shows no readable value ({_element_text(after)}).")
+        if changes := await _other_changes(info.handle, skip_ref=int(ref)):
+            lines.append(changes)
     else:
         lines.append("No field was named, so the typed text cannot be read back; look at the screen to check.")
+        if changes := await _other_changes(info.handle):
+            lines.append(changes)
     return ToolResult.success("\n".join(lines))
 
 
@@ -550,7 +613,10 @@ async def press_keys(keys: str, repeat: int = 1, ctx: ToolContext = None) -> Too
     except OSError as exc:
         return ToolResult.fail(f"could not press {chord_text}: {exc}")
     times = f" x{int(repeat)}" if int(repeat) > 1 else ""
-    return ToolResult.success(f"Pressed {chord_text}{times}.\n{_title_change(before, after_title)}")
+    text = f"Pressed {chord_text}{times}.\n{_title_change(before, after_title)}"
+    if info.handle in _state.seen and (changes := await _other_changes(info.handle)):
+        text += "\n" + changes
+    return ToolResult.success(text)
 
 
 # ---------------------------------------------------------------- scroll

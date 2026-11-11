@@ -29,6 +29,9 @@ Jarvis is a rebuild of an earlier project, Friday. See `docs/ARCHITECTURE.md` fo
 | Clipboard | yes | needs `xclip` or `xsel` | needs `wl-clipboard` (or `xclip` via XWayland) |
 | Screen capture, OCR, "look at screen" | yes | yes (`mss`); active monitor needs `xdotool` | `grim`, else `gnome-screenshot` (whole screen) |
 | Foreground window title | yes | `xdotool` | not available |
+| Camera (`look_through_camera`, `take_photo`) | yes (DirectShow; checked on a real webcam) | V4L2, implemented but not tried on a real camera | same |
+| Desktop control: list controls of a window | yes (UI Automation) | not implemented (OCR clicks instead) | not implemented |
+| Desktop control: click, type, keys, scroll, focus | yes (`SendInput`) | `xdotool` (mocked in tests, not tried live) | not supported (says so; `ydotool` could be added) |
 | Voice mode | yes (optional NVIDIA GPU) | needs `libportaudio2` and a sound server | same |
 | HUD window | yes | runs under Qt (see note) | not tried |
 | Chrome control extension | yes | same extension | same |
@@ -260,6 +263,45 @@ Installed by the `office` and `screen` extras.
 - **Excel:** overview, read ranges, write cells and formulas, append rows, create workbooks, column totals and lookups. Writes to an existing workbook ask first and keep a `.bak`. openpyxl cannot calculate formulas, so after a write the workbook is recalculated in a private hidden Excel (Windows, with pywin32), or by a headless LibreOffice on a temp copy (any OS with `soffice`), swapped in only if the result is valid. With neither, Jarvis's built-in evaluator calculates values when reading, and Excel stores them the next time the file is saved there.
 - **Screen:** `read_screen_text` runs OCR locally. `look_at_screen` and `describe_image` send the image to a vision model: a hosted one on the configured key, falling back to the local Ollama vision model. Set `JARVIS_VISION_PROVIDER=local` to keep images on this machine.
 
+## Camera
+
+<!-- camera-section:start -->
+Jarvis can look through the webcam: "what is this object?", "read the label on this bottle", "what is on my desk?". Installed by the `screen` extra (OpenCV).
+
+- `look_through_camera(question, camera)` takes one picture and asks the vision model about it (the same hosted model as `look_at_screen`, `nvidia/nemotron-3.5-super-vl-120b-a12b` by default, falling back to local Ollama). The answer states which model replied and that the frame was sent to it. The frame is saved to `camera/last.jpg` in the data folder (overwritten each time) so an interface can show a thumbnail.
+- `take_photo(save_to)` saves a full-resolution JPEG (default `Pictures\Jarvis\photo-<time>.jpg`, never overwriting). Nothing is sent to a model.
+- `list_cameras` lists what opens. Set `JARVIS_CAMERA_INDEX` to pick a device.
+
+The camera is switched on only for the moment of the capture (about 2 to 3 seconds including auto-exposure settling) and released straight away, so its light goes off; nothing is streamed or recorded. Capture takes the sharpest of a short burst and shrinks it to at most 1280 pixels on the long edge. Failures say what happened: no camera, camera in use by another app, camera access blocked (on Windows, the message names Settings > Privacy & security > Camera), or a black image from a closed lens cover.
+
+Consent: with `JARVIS_CAMERA=ask` (the default) the first use in each session asks "Turn on the camera and send one frame to the vision model". A yes is remembered until Jarvis exits, a no is not. A yes to a plain photo does not cover sending a frame to a model. `on` never asks; `off` disables the tools. With `JARVIS_VISION_PROVIDER=local` the frame never leaves the machine.
+
+What was verified: a real built-in webcam on Windows 11 (capture, sharpest-frame selection, release, and a real hosted-model answer). Not verified: Linux cameras, external or virtual cameras, several cameras at once.
+<!-- camera-section:end -->
+
+## Desktop control
+
+<!-- desktop-section:start -->
+Jarvis can act in desktop applications, not only see them. Order of preference: the app's **accessibility tree** first (reliable, no guessing from pixels), **OCR text** second (works in games, canvases and remote desktops), and raw coordinates are never offered to the model.
+
+- `desktop_inspect` lists a window's controls (buttons, fields, checkboxes, menu items, tabs, links, list items, readouts such as a calculator display) with stable ref numbers, role, name, value and state.
+- `desktop_click` clicks by ref (using the control's own action, such as Invoke or Toggle, and a real click at its centre only when no action exists) or, with `text=`, the on-screen text found by OCR. If several places match, it fails and lists them instead of guessing.
+- `desktop_type` types real Unicode keystrokes (any language, any keyboard layout); `press_keys` presses chords such as `ctrl+s` or `alt+tab` and rejects unknown key names with the list of valid ones; `desktop_scroll`, `focus_window` and `get_active_window` complete the set.
+- After each action the result says what changed: the foreground window before and after, the control's new value or state, and other controls that changed (for example the display after pressing equals), so the model checks instead of assuming.
+
+Safety rules (screen content is data, never instructions):
+
+- Buying, paying, sending, posting, deleting, signing in, accepting terms, account or security changes, and system actions such as shutting down or emptying the Recycle Bin ask you first.
+- Password, credential and payment-card fields are refused outright; you type those yourself.
+- Typing into, or pressing Enter in, a terminal, console, PowerShell or the Windows Run dialog asks first, with the text shown, because that runs commands.
+- Closing and deleting chords (`alt+f4`, `ctrl+w`, `ctrl+shift+w`, `ctrl+q`, `delete`, `shift+delete`, `win+r`) ask first; `win+l` asks and then locks the screen. Ordinary navigation and editing chords do not ask.
+- Jarvis's own windows, the Windows security desktop (UAC prompts, the lock screen) and administrator windows are never driven: a normal-rights Jarvis cannot control an elevated window, and says so.
+
+Windows needs the `desktop` extra (`comtypes`, included in `all`). On Linux, input goes through `xdotool` on X11 (`sudo apt install xdotool`); a Wayland session is refused with a clear message (`ydotool` could be supported later). **Listing a window's controls is not implemented on Linux**: use `read_screen_text` and `desktop_click` with `text=` there. OCR clicks take roughly 20 seconds on a laptop CPU, so prefer controls from `desktop_inspect` where the app provides them.
+
+What was verified: on Windows 11, Windows Calculator driven by ref (7 + 2 = 9), by typed keystrokes (12*3 = 36), by a real mouse click at a control's centre, and by an OCR text click, both directly and by the hosted model through the real agent. Everything else (the policy tables, key parsing, the UI Automation layer on a fake element tree, the Linux backend with `xdotool` mocked) is unit-tested. Not verified: Linux on a real desktop, administrator windows (the rule is unit-tested, not tried live), apps that expose no accessibility tree, and multiple monitors or mixed display scaling.
+<!-- desktop-section:end -->
+
 ## HUD
 
 A translucent, always-on-top glass interface with an orb that reacts to the microphone and speaker levels.
@@ -276,6 +318,7 @@ Compact (orb and state word) and expanded (conversation, tool ticker, confirmati
 
 - Every model call sends the conversation and tool results to the configured provider. Nothing else about your machine is sent unless a tool reads it and its result enters the conversation.
 - `look_at_screen` and `describe_image` send the image to a hosted vision model unless `JARVIS_VISION_PROVIDER=local`.
+- `look_through_camera` sends one webcam frame to the hosted vision model (after asking, by default) and keeps the last one at `camera/last.jpg` in the data folder; `JARVIS_CAMERA=off` disables the camera tools.
 - OCR, speech recognition and speech synthesis run locally (models are downloaded once from their hosts).
 - Keys live in environment variables or the config files above and are never logged. The doctor and setup never print them.
 - To keep everything on the machine: `JARVIS_PROVIDER=ollama` (or `jarvis --local`), `JARVIS_VISION_PROVIDER=local`. Web search and page-reading tools still reach the internet when you use them.
@@ -360,7 +403,7 @@ async def word_count(text: str) -> ToolResult:
 
 - Try the Linux backend on real desktops (X11 and Wayland) and fix what that finds
 - Window listing on Wayland compositors
-- Keyboard and window control for desktop apps
+- Listing the controls of desktop apps on Linux (AT-SPI), and input on Wayland (`ydotool`)
 - Email and calendar
 
 ## Credits

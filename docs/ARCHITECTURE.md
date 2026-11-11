@@ -81,6 +81,27 @@ conservative allowlist classifier (`classify_bash`) next to the PowerShell one; 
 description and system prompt name the shell and OS actually in use. Excel recalculation is
 Excel COM on Windows or a headless LibreOffice convert of a temp copy elsewhere (`excel_calc.py`).
 
+## Senses and hands (camera, desktop control)
+
+<!-- senses:start -->
+Two tool groups add the physical side. **Camera** (`vision/camera.py`, `tools/builtin/camera.py`):
+OpenCV opens the device, discards the first frames while auto-exposure settles, keeps the
+sharpest of a short burst, releases the device in a `finally`, and hands a downscaled PIL image
+to the same `VisionClient` the screen tools use. Consent is a setting (`JARVIS_CAMERA`: `ask`
+by default, once per process, a refusal is not remembered). **Desktop control**
+(`tools/builtin/desktop.py`, policy in `desktop/policy.py`, OCR targeting in
+`desktop/ocr_target.py`) works accessibility-tree first, OCR text second, and never offers raw
+coordinates to the model. The OS-specific parts are new `Platform` methods: window info, focus,
+element listing and acting (`windows_uia.py`: UI Automation through `comtypes`, one COM thread,
+one cached subtree call per window, refs keyed by the element's RuntimeId so they stay stable),
+and input synthesis (`windows_input.py`: `SendInput`, Unicode typing; Linux: `xdotool` on X11,
+no element listing yet). The safety rules live in one pure module that reuses
+`browser/policy.py`: consequential clicks ask, credential fields and elevated, own and
+security-desktop windows are refused, terminals and the Run dialog ask with the text shown,
+irreversible key chords ask. Every action reads back what changed. Camera and desktop are not in
+the small local model's default tool groups.
+<!-- senses:end -->
+
 ## Configuration lookup
 
 First match wins: environment variables, then `<repo>/.env` (only when running from a

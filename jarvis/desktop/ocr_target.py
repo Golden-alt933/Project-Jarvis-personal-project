@@ -113,9 +113,30 @@ def describe_candidates(cands: list[Candidate], size: tuple[int, int]) -> str:
     )
 
 
-def grab_for_ocr(window_rect: tuple[int, int, int, int] | None = None) -> ScreenGrab:
+CROP_MARGIN = 0.15  # of the window size, on each side, so popups at its edge are still seen
+MIN_CROP = 60
+
+
+def _crop_box(
+    rect: tuple[int, int, int, int], left: int, top: int, size: tuple[int, int]
+) -> tuple[int, int, int, int] | None:
+    """The window rect (screen pixels) with a margin, as a box inside an image whose top-left
+    is at screen (left, top); None when it would be tiny or empty."""
+    width, height = rect[2] - rect[0], rect[3] - rect[1]
+    mx, my = round(width * CROP_MARGIN), round(height * CROP_MARGIN)
+    box = (
+        max(0, rect[0] - mx - left), max(0, rect[1] - my - top),
+        min(size[0], rect[2] + mx - left), min(size[1], rect[3] + my - top),
+    )
+    if box[2] - box[0] < MIN_CROP or box[3] - box[1] < MIN_CROP:
+        return None
+    return box
+
+
+def grab_for_ocr(window_rect: tuple[int, int, int, int] | None = None, crop: bool = False) -> ScreenGrab:
     """The monitor showing the foreground window (else the one under the pointer), shrunk for
-    OCR. Blocking. Wayland goes through the platform's screenshot tool (whole screen)."""
+    OCR; with ``crop`` only the window and a margin around it, which is several times faster.
+    Blocking. Wayland goes through the platform's screenshot tool (whole screen)."""
     try:
         import mss
         from PIL import Image
@@ -143,5 +164,10 @@ def grab_for_ocr(window_rect: tuple[int, int, int, int] | None = None) -> Screen
             raise
         except Exception as exc:
             raise CaptureError(f"could not read the screen: {exc}") from exc
+    if crop and window_rect is not None:
+        box = _crop_box(window_rect, left, top, native.size)
+        if box is not None:
+            native = native.crop(box)
+            left, top = left + box[0], top + box[1]
     image = downscale(native, OCR_MAX_EDGE)
     return ScreenGrab(image=image, left=left, top=top, scale=native.width / image.width)

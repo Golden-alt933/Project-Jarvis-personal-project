@@ -160,6 +160,7 @@ def desk(monkeypatch):
     monkeypatch.setattr(tools.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(policy, "own_process_ids", lambda extra=(): {777})
     tools._state.target = None
+    tools._state.seen.clear()
     backend.elements[1] = [
         el(1, "button", "Seven"), el(2, "button", "Plus"), el(3, "button", "Two"), el(4, "button", "Equals"),
         el(5, "text", "Display is 0", automation_id="CalculatorResults"),
@@ -176,6 +177,7 @@ def desk(monkeypatch):
     yield backend
     plat.set_backend(None)
     tools._state.target = None
+    tools._state.seen.clear()
 
 
 async def _no_sleep(_):
@@ -280,6 +282,7 @@ async def test_click_by_ref_acts_and_reports_what_changed(desk):
     assert result.ok
     assert "Clicked [1] button 'Seven' (via invoke)" in result.content
     assert "Foreground window unchanged: 'Calculator'" in result.content
+    assert "Other changes in the window: [5] text 'Display is 0' -> 'Display is 7'" in result.content
     assert "Element [1] changed: state '-' -> 'pressed'" in result.content
     assert desk.actions() == [("act", 1, 1, "click")] and asker.asked == []
 
@@ -429,10 +432,11 @@ async def test_ocr_no_match_lists_what_was_seen(desk, ocr):
 
 async def test_ocr_coordinates_follow_the_downscale_and_monitor_origin(desk, ocr, monkeypatch):
     desk.screen = Image.new("RGB", (3136, 1764), "white")  # twice the OCR size of 1568 wide
+    desk.wins[0] = winfo(1, "Calculator", "ApplicationFrameHost.exe", rect=(0, 0, 3136, 1764))  # maximised
     real_grab = ocr_target.grab_for_ocr
 
-    def grab_with_offset(rect=None):
-        grab = real_grab(rect)
+    def grab_with_offset(rect=None, crop=False):
+        grab = real_grab(rect, crop)
         return ocr_target.ScreenGrab(grab.image, left=1920, top=-100, scale=grab.scale)
 
     monkeypatch.setattr(tools, "grab_for_ocr", grab_with_offset)
@@ -464,6 +468,30 @@ async def test_ocr_click_in_a_blocked_foreground_window(desk, ocr):
     ocr.lines = ocr_lines(("Start", 100, 200, 200, 240))
     ctx, _ = ctx_with()
     assert not (await tools.desktop_click(text="Start", ctx=ctx)).ok and desk.actions() == []
+
+
+async def test_ocr_searches_the_window_first_then_the_whole_monitor(desk, ocr, monkeypatch):
+    desk.wins[0] = winfo(1, "Calculator", "ApplicationFrameHost.exe", rect=(100, 100, 300, 250))
+    seen = []
+    real_grab = ocr_target.grab_for_ocr
+
+    def spy(rect=None, crop=False):
+        grab = real_grab(rect, crop)
+        seen.append((crop, grab.image.size, grab.left, grab.top))
+        return grab
+
+    monkeypatch.setattr(tools, "grab_for_ocr", spy)
+    ocr.lines = []
+    ctx, _ = ctx_with()
+    miss = await tools.desktop_click(text="Quit", ctx=ctx)
+    assert not miss.ok
+    assert [s[0] for s in seen] == [True, False], "the window was searched, then the whole monitor"
+    assert seen[0][1][0] < seen[1][1][0] and seen[0][2:] == (70, 78) and seen[1][2:] == (0, 0)
+    seen.clear()
+    ocr.lines = ocr_lines(("Quit", 10, 10, 50, 30))
+    hit = await tools.desktop_click(text="Quit", ctx=ctx)
+    assert hit.ok and [s[0] for s in seen] == [True], "found in the window: no second pass"
+    assert desk.actions() == [("click", 70 + 30, 78 + 20, False)]
 
 
 def test_contained_text_clicks_where_the_words_are():
@@ -717,3 +745,47 @@ async def test_desktop_tools_through_the_registry(desk):
     assert not bad.ok and "invalid arguments" in bad.content
     schema = specs["desktop_click"].parameters
     assert set(schema["properties"]) == {"ref", "text", "double"}
+
+
+# ---------------------------------------------------------------- what else changed after an action
+async def test_actions_report_new_and_vanished_controls(desk):
+    ctx, _ = ctx_with()
+    await tools.desktop_inspect()
+
+    def on_act(handle, ref, action):
+        desk.elements[1] = [e for e in desk.elements[1] if e.ref != 7] + [el(8, "button", "History"), el(9, "button", "Pin")]
+        return "invoke"
+
+    desk.on_act = on_act
+    result = await tools.desktop_click(ref=1, ctx=ctx)
+    assert "2 new control(s)" in result.content and "1 gone" in result.content and "inspect again" in result.content
+
+
+async def test_no_other_changes_means_no_extra_line(desk):
+    ctx, _ = ctx_with()
+    await tools.desktop_inspect()
+    result = await tools.desktop_click(ref=1, ctx=ctx)
+    assert "Other changes" not in result.content
+
+
+async def test_typing_and_keys_report_other_changes_too(desk):
+    ctx, _ = ctx_with()
+    await tools.desktop_inspect()  # Calculator
+    desk.elements[1][4].name = "Display is 36"
+    typed = await tools.desktop_type("12*3=", ctx=ctx)
+    assert "'Display is 0' -> 'Display is 36'" in typed.content
+    desk.elements[1][4].name = "Display is 0"
+    pressed = await tools.press_keys("escape", ctx=ctx)
+    assert "'Display is 36' -> 'Display is 0'" in pressed.content
+
+
+async def test_a_failed_re_read_does_not_spoil_the_result(desk):
+    ctx, _ = ctx_with()
+    await tools.desktop_inspect()
+
+    def broken(handle):
+        raise OSError("window went away")
+
+    desk.ui_snapshot = broken
+    result = await tools.desktop_click(ref=1, ctx=ctx)
+    assert result.ok and "Other changes" not in result.content

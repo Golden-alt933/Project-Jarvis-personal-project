@@ -1,12 +1,20 @@
 """Windows UI Automation through ``comtypes`` against UIAutomationCore.
 
-Why comtypes directly (measured on this project's dev machine, Python 3.13, Windows 11,
-whole-window enumeration of the raw view, seconds, after a warm-up):
+Why comtypes directly. Measured on the dev machine (Python 3.13, Windows 11), enumerating
+a whole window, seconds per enumeration after a warm-up, plus import time:
 
-    library          import    Calculator (73 el.)   Chrome window (300 el. raw view)
-    uiautomation     0.3-0.5   0.08                  0.35
-    pywinauto (uia)  1.0-1.2   0.07                  (control view only: 76 el.) 0.19
-    comtypes direct  0.5       0.03-0.04             0.07-0.09
+    library          import   Calculator          Chrome window
+    uiautomation     0.3-0.5  0.08 (126 el.)       0.35 (300 el., raw view)
+    pywinauto (uia)  1.0-1.2  0.07 (73 el.)        0.19 (76 el.: control view only)
+    comtypes direct  0.5      0.03-0.10 (73-126)   0.07-0.09 (300 el., raw view)
+
+(The element counts differ because the control view hides most of Chrome's page content
+and Calculator's raw tree is larger; comtypes was timed in both views.) With the library
+choice made, the final implementation measures 0.08-0.10 s for Calculator (126 raw elements,
+56 listed) and 0.22 s for a Chrome window with a loaded page (640 raw, 128 listed); the
+first call in a process takes about 1 s (type library wrapper, COM start-up). comtypes is
+one pure-Python package that uiautomation itself builds on; pywinauto is slower to import
+and adds pywin32 and six.
 
 The fast path is one ``BuildUpdatedCache`` call with ``TreeScope_Subtree``: UIA fetches the
 whole subtree and every property we read in one cross-process round trip, and the walk is
@@ -149,8 +157,13 @@ class UiaSession:
             # apartment, so elements can also be used from the short helper threads below.
             if not hasattr(sys, "coinit_flags"):
                 sys.coinit_flags = 0  # type: ignore[attr-defined]
+            import comtypes
             import comtypes.client
 
+            try:  # comtypes only initialises the thread that first imported it; this is another
+                comtypes.CoInitializeEx(0)
+            except OSError:
+                pass  # this thread is already initialised (possibly in another apartment mode)
             comtypes.client.GetModule("UIAutomationCore.dll")
             from comtypes.gen import UIAutomationClient as ui
 
