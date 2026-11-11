@@ -141,6 +141,12 @@ if [ "$MINIMAL" = 0 ]; then
   need lib libxcb-keysyms.so.1 libxcb-keysyms1 xcb-util-keysyms xcb-util-keysyms libxcb-keysyms1
   need lib libxcb-render-util.so.0 libxcb-render-util0 xcb-util-renderutil xcb-util-renderutil libxcb-render-util0
   need lib libxcb-xinerama.so.0 libxcb-xinerama0 libxcb libxcb libxcb-xinerama0
+  need lib libxcb-shape.so.0 libxcb-shape0 libxcb libxcb libxcb-shape0
+  need lib libxcb-randr.so.0 libxcb-randr0 libxcb libxcb libxcb-randr0
+  need lib libxcb-xfixes.so.0 libxcb-xfixes0 libxcb libxcb libxcb-xfixes0
+  need lib libxcb-sync.so.1 libxcb-sync1 libxcb libxcb libxcb-sync1
+  need lib libxcb-xkb.so.1 libxcb-xkb1 libxcb libxcb libxcb-xkb1
+  need lib libxcb-xinput.so.0 libxcb-xinput0 libxcb libxcb libxcb-xinput0
 fi
 
 if [ "${#MISSING[@]}" -gt 0 ]; then
